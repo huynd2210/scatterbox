@@ -2,20 +2,101 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { NewProvider, ProviderInfo } from "../types";
 
-/** First-run wizard: create the vault, then add providers — the same
- * onboarding the CLI offers, without leaving the browser. */
+/** First-run wizard: set up fresh (vault + providers) or import an existing
+ * archive — the same two paths the CLI offers, without leaving the browser. */
 export function SetupWizard({ onDone }: { onDone: () => void }) {
-  const [step, setStep] = useState<"passphrase" | "providers">("passphrase");
+  const [step, setStep] = useState<"choice" | "passphrase" | "providers" | "import">(
+    "choice",
+  );
 
   return (
     <div className="center-screen wide">
       <h1>scatterbox</h1>
-      {step === "passphrase" ? (
-        <PassphraseStep onNext={() => setStep("providers")} />
-      ) : (
-        <ProvidersStep onDone={onDone} />
+      {step === "choice" && (
+        <>
+          <p className="muted">No archive on this machine yet.</p>
+          <div className="choice-cards">
+            <button className="choice" onClick={() => setStep("passphrase")}>
+              <strong>set up new</strong>
+              <span className="muted small">
+                choose a passphrase, add storage providers
+              </span>
+            </button>
+            <button className="choice" onClick={() => setStep("import")}>
+              <strong>import existing</strong>
+              <span className="muted small">
+                backup zip, vault + register files — or vault alone to recover
+                from provider snapshots
+              </span>
+            </button>
+          </div>
+        </>
+      )}
+      {step === "passphrase" && <PassphraseStep onNext={() => setStep("providers")} />}
+      {step === "providers" && <ProvidersStep onDone={onDone} />}
+      {step === "import" && (
+        <ImportStep onDone={onDone} onBack={() => setStep("choice")} />
       )}
     </div>
+  );
+}
+
+function ImportStep({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [passphrase, setPassphrase] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const vaultOnly =
+    files.length === 1 && files[0].name.toLowerCase().endsWith(".json");
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    api
+      .importBackup(files, passphrase)
+      .then(onDone)
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <>
+      <h2>import an existing archive</h2>
+      <p className="muted">
+        Pick your <code>scatterbox-backup.zip</code> (or{" "}
+        <code>vault.json</code> + register file). <code>vault.json</code> alone
+        works too: the register is then recovered from the encrypted snapshots
+        scatterbox keeps on your providers.
+      </p>
+      <form onSubmit={submit} className="unlock">
+        <input
+          type="file"
+          multiple
+          accept=".zip,.json,.db,.sbsnap"
+          onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+        />
+        {vaultOnly && (
+          <p className="muted small">
+            vault only — will recover the register from provider snapshots
+          </p>
+        )}
+        <input
+          type="password"
+          placeholder="master passphrase"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+        />
+        <button disabled={busy || files.length === 0 || passphrase === ""}>
+          {busy ? "importing…" : "import"}
+        </button>
+        <button type="button" className="ghost" onClick={onBack}>
+          back
+        </button>
+        {error && <p className="error">{error}</p>}
+      </form>
+    </>
   );
 }
 

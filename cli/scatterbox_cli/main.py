@@ -21,7 +21,7 @@ from typing import Annotated, NoReturn, Optional
 
 import typer
 
-from scatterbox import onboarding, pipeline, scrubber, vault
+from scatterbox import onboarding, pipeline, portability, scrubber, vault
 from scatterbox.errors import ScatterboxError
 from scatterbox.placement import Policy
 from scatterbox.providers import create_provider, requires_secrets
@@ -402,6 +402,84 @@ def provider_set(
     finally:
         register.close()
     typer.echo(f"updated provider {name}")
+
+
+@app.command()
+def export(
+    dest: Annotated[Path, typer.Argument(help="Directory for the two backup files.")],
+    plain: Annotated[bool, typer.Option("--plain", help="Write the register as plain SQLite instead of encrypting it.")] = False,
+) -> None:
+    """Export the register + vault for moving to another machine (PLAN.md §9)."""
+    register = _open_register()
+    try:
+        master_key = None if plain else _unlock().master_key
+        reg_path, vault_path = portability.export_archive(
+            register, _home() / "vault.json", dest, master_key=master_key
+        )
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    typer.echo(f"exported {reg_path} and {vault_path}")
+    typer.echo("both files + your passphrase = your archive on any machine")
+
+
+@app.command("import")
+def import_cmd(
+    register_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    vault_file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an already-initialized home.")] = False,
+) -> None:
+    """Restore an exported register + vault into the scatterbox home."""
+    try:
+        _, files = portability.import_archive(
+            _home(),
+            vault_bytes=vault_file.read_bytes(),
+            register_blob=register_file.read_bytes(),
+            passphrase=_passphrase(),
+            force=force,
+        )
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    typer.echo(f"imported archive with {files} file(s) into {_home()}")
+
+
+@app.command()
+def snapshot() -> None:
+    """Upload an encrypted register snapshot to the most reliable providers."""
+    register = _open_register()
+    try:
+        names = asyncio.run(
+            portability.snapshot_to_providers(register, _unlock())
+        )
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    typer.echo(f"register snapshot stored on: {', '.join(names)}")
+
+
+@app.command()
+def restore(
+    vault_file: Annotated[Optional[Path], typer.Option("--vault", exists=True, dir_okay=False, help="Vault file to install first (when the home is empty).")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing register.db.")] = False,
+) -> None:
+    """Disaster recovery: rebuild the register from a provider snapshot
+    using only the vault + passphrase."""
+    home = _home()
+    if vault_file is not None:
+        home.mkdir(parents=True, exist_ok=True)
+        if (home / "vault.json").exists() and not force:
+            _fail(f"{home / 'vault.json'} already exists (use --force to replace)")
+        (home / "vault.json").write_bytes(vault_file.read_bytes())
+    try:
+        v = vault.unlock_vault(home / "vault.json", _passphrase())
+        files, provider = asyncio.run(
+            portability.restore_register_from_snapshot(home, v, force=force)
+        )
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    typer.echo(f"restored register with {files} file(s) from provider {provider!r}")
 
 
 @app.command()

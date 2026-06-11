@@ -46,6 +46,12 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
           <button onClick={() => setAdding((a) => !a)}>
             {adding ? "close" : "add provider"}
           </button>
+          <button
+            onClick={() => location.assign(api.exportUrl)}
+            title="download vault + encrypted register snapshot"
+          >
+            export backup
+          </button>
           <button onClick={() => scrub({})}>scrub</button>
           <button onClick={() => scrub({ deep: true })}>deep scrub</button>
           <button onClick={() => scrub({ repair: true })}>scrub + repair</button>

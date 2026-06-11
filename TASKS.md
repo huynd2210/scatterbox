@@ -1,99 +1,70 @@
-# TASKS.md — Phase 3: Daemon + Web explorer
+# TASKS.md — Phase 4: Portability + recovery
 
-**Status: ✅ complete (2026-06-11).** All gates automated and green (145
-tests); UI verified live against a real daemon (unlock → browse → upload →
-health dots → transfers). See PLAN.md §12 Phase 3 for the deviations note.
-Phase 2 note: code complete; its real-credential gates (real Drive/OneDrive
-round-trip, manual revoke-and-heal) remain open and are tracked in PLAN.md
-§12 — the user runs them when ready. Nothing in Phase 3 depends on them.
+**Status: ✅ complete (2026-06-11).** Both PLAN gates automated (157 tests)
+and exercised live: CLI export → web-wizard import restored a home
+byte-identically; auto-snapshot + vault-only recovery rebuilt a destroyed
+register. See PLAN.md §12 Phase 4 for deviations.
+(Phase 2's real-credential gates remain open, tracked in PLAN.md §12.)
 
-Read `PLAN.md` first (§4 architecture, §11 UX, §12 Phase 3). Build on
-`core/scatterbox/` — the daemon imports the same library functions the CLI
-uses (one code path); no storage logic in the daemon or the UI.
+Read `PLAN.md` first (§9 register+vault portability, §12 Phase 4). The
+register is the crown jewel; these tasks make it survivable: export/import
+for deliberate moves, automatic provider snapshots for disasters.
 
-## 1. Core support work ✅
+## 1. Core portability (`core/scatterbox/portability.py`) ✅
 
-- **Fast listing:** `Register.list_children(vpath)` — SQL range scan over the
-  vpath index (two queries: direct files, distinct first-level subdir names)
-  instead of `list_all_files()`'s full-table scan in Python. `pipeline.list_dir`
-  switches to it. This is what buys the <100 ms browse gate at 50k files.
-- **Move/rename:** `pipeline.move_path(register, src, dst)` — single file or
-  whole directory subtree (prefix rewrite), VPathExists checks, one transaction.
-- **Job queue CRUD on the register:** add/claim/update/list for the existing
-  `jobs` table (pending → running → done/failed, payload JSON, result JSON).
-- **Upload progress hook:** optional `on_progress(bytes_done, bytes_total)`
-  callback on `put_file` (called per chunk) so the daemon can stream progress.
+- **Snapshot format:** consistent register bytes via the SQLite backup API →
+  zstd → AES-256-GCM under the master key (`SBSNAP1` magic + nonce + ct,
+  AAD-bound). Plain (unencrypted) export also allowed per PLAN.md §9.
+- **export_archive:** register snapshot (encrypted or plain) + vault copy.
+- **import_archive:** validate the vault against the passphrase FIRST, then
+  accept either snapshot or raw SQLite register bytes, sanity-open the
+  result (migrations + file count) before finalizing. Refuses an
+  initialized home unless forced.
+- **snapshot_to_providers:** encrypt → upload to the ≥2 most reliable
+  providers → store the locations (provider type/config/ref) in the vault
+  under `register-snapshot`, then best-effort delete the previous
+  snapshot's objects. The vault is what makes recovery possible: it already
+  holds the credentials, now also where the snapshot lives.
+- **restore_register_from_snapshot:** vault + passphrase only → fetch from
+  any stored location → decrypt → validate → install.
 
-*Verify:* unit tests incl. a 50k-file index seeded in one transaction —
-`list_children` at the root and nested stays well under 100 ms.
+*Verify (the two PLAN gates):* export on A, import into a clean home →
+byte-identical downloads; destroy register.db, restore from passphrase +
+provider snapshot → byte-identical downloads.
 
-## 2. Daemon (FastAPI, `daemon/scatterbox_daemon/`) ✅
+## 2. CLI ✅
 
-Local-only by default (binds 127.0.0.1). Holds the register open and the
-vault **in memory only after an explicit unlock**:
+`scatterbox export <dir> [--plain]`, `scatterbox import <register> <vault>
+[--force]`, `scatterbox snapshot`, `scatterbox restore --vault <file>`.
 
-- `POST /api/unlock` {passphrase} / `POST /api/lock` / `GET /api/status`
-  (locked?, counts, global durability % of chunks at full floor)
-- **VFS:** `GET /api/files?path=` (children via list_children),
-  `GET /api/file?path=` (stat + health + replica detail: which providers),
-  `POST /api/move`, `DELETE /api/file?path=`
-- **Health batch:** `POST /api/health` [paths] → per-file health dots (for
-  the visible rows of a virtualized list only)
-- **Transfers:** `POST /api/upload` (multipart; spools to a temp file,
-  enqueues an upload job, returns job id — the request never waits for
-  providers), `GET /api/download?path=` (streams the reassembled file),
-  job list/inspect `GET /api/jobs`
-- **Job worker:** single asyncio consumer in the daemon process; runs
-  upload/scrub jobs through the core library; progress + state transitions
-  broadcast over WebSocket
-- **WebSocket `/ws`:** job created/progress/done/failed events, scrub
-  reports — the UI's live feed
-- **Providers:** `GET /api/providers` (quota + confidence + reliability +
-  replica counts), `POST /api/scrub` (enqueue scrub job, options deep/repair)
+## 3. Daemon + automatic safety net ✅
 
-*Verify:* API tests via httpx ASGI transport — upload returns before any
-provider I/O completes (job-based); locked daemon refuses crypto endpoints;
-move/rm/list round-trip; WS receives job lifecycle; health endpoint flips
-within one scrub cycle after chaos-provider failure injection.
+- `GET /api/export` (unlocked): one zip — vault.json + encrypted register
+  snapshot.
+- `POST /api/import` (uninitialized only): multipart; accepts the export
+  zip, or vault+register files, or vault alone (→ provider-snapshot
+  restore). Detects parts by content, not filename. Unlocks on success so
+  the wizard drops straight into the explorer. The daemon's open register
+  connection is closed around the file swap and reopened.
+- **Debounced auto-snapshot:** mutating jobs (upload/delete/scrub) and
+  move/rm mark the state dirty; a background task snapshots to providers
+  ~20 s after changes settle (skipped while locked), reported over /ws.
 
-## 3. Web explorer (`web/`, React + Vite + TypeScript) ✅
+*Verify:* API tests — export zip round-trips through import on a fresh
+home; vault-only restore works; auto-snapshot fires after an upload
+(debounce shortened via monkeypatch).
 
-Talks to the daemon over HTTP + WS. Pages (simple tabs, no router dep):
+## 4. Web UI ✅
 
-- **Files:** breadcrumb navigation, virtualized list (@tanstack/react-virtual),
-  drag-drop + button upload, download, rename/move, delete; per-row badges —
-  health dots (●●●/●●○/●○○/lost), replica count, size; lazy health fetch for
-  visible rows only; "where is this?" detail panel per file listing providers.
-- **Transfers:** live job list from /ws (progress bars, states, errors).
-- **Providers:** capacity bars **with confidence labels** (exact/estimated/
-  unknown — never lie about precision), reliability score, scrub button
-  (normal/deep/repair). Unlock screen when the daemon is locked.
+- First-run screen becomes a choice: **set up new** (existing wizard) or
+  **import backup** (drop the export zip — or vault.json + register file,
+  or vault.json alone for provider-snapshot recovery — plus passphrase).
+- **export backup** button on the providers tab.
 
-*Verify:* `npm run build` clean (strict TS); daemon serves `web/dist` at `/`
-so `scatterbox daemon` is the whole product.
+*Verify:* `npm run build` clean; wizard choice + import path exercised
+against a live daemon.
 
-## 4. Packaging + CLI ✅
+## 5. Wrap-up ✅
 
-- `scatterbox daemon [--host --port]` CLI command (uvicorn).
-- pyproject: add `daemon/scatterbox_daemon` to the hatchling packages list
-  (one distribution — not a workspace); new deps: fastapi, uvicorn,
-  python-multipart.
-
-## 5. Phase gate (PLAN.md §12) ✅
-
-- [x] Browse operations <100 ms on a 50k-file index
-  (test_listing_and_move.py::test_listing_50k_files_under_100ms).
-- [x] Uploads never block the UI
-  (test_daemon.py::test_upload_returns_before_provider_io — <0.9 s against
-  1 s-latency providers).
-- [x] Health/tier badges reflect injected failures within one scrub cycle
-  (test_daemon.py::test_health_flips_within_one_scrub_cycle).
-- [x] Full suite green, no regressions (145 passed); `npm run build` clean
-  under strict TS.
-
-## Constraints
-
-- Simplicity first; the daemon is a thin shell over `core/scatterbox`.
-- UI: no component libraries; one CSS file; virtualization is the only
-  rendering dependency.
-- When done: update PLAN.md §12 and this file.
+PLAN.md §12 Phase 4 marked with deviations; README portability section;
+full suite green (157 passed) + web build clean.

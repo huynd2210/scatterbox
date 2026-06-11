@@ -50,6 +50,10 @@ class DaemonState:
     # immediately instead of on the next poll tick.
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     worker: asyncio.Task | None = None
+    # Set by anything that mutates the register; the snapshot loop debounces
+    # it into an encrypted register snapshot on the providers (PLAN.md §9).
+    dirty: asyncio.Event = field(default_factory=asyncio.Event)
+    snapshotter: asyncio.Task | None = None
 
     @property
     def tmp_dir(self) -> Path:

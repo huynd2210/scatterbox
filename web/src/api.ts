@@ -32,6 +32,16 @@ const json = (body: unknown): RequestInit => ({
 export const api = {
   status: () => request<Status>("/api/status"),
   init: (passphrase: string) => request("/api/init", json({ passphrase })),
+  importBackup: (files: File[], passphrase: string) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f);
+    form.append("passphrase", passphrase);
+    return request<{ files: number; restored_from: string }>("/api/import", {
+      method: "POST",
+      body: form,
+    });
+  },
+  exportUrl: "/api/export",
   unlock: (passphrase: string) => request("/api/unlock", json({ passphrase })),
   lock: () => request("/api/lock", { method: "POST" }),
 

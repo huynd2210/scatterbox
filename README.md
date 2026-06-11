@@ -57,7 +57,7 @@ current work is tracked in [TASKS.md](TASKS.md).
 | 1 | Replication + repair (placement engine, scrubber, chaos-tested healing) | ✅ |
 | 2 | Real providers + vault (Google Drive, OneDrive, OAuth, secret vault) | ✅ code complete — real-credential gates pending |
 | 3 | Daemon + web explorer (FastAPI, React, virtualized listing) | ✅ |
-| 4 | Portability + recovery (export/import, register snapshots to providers) | — |
+| 4 | Portability + recovery (export/import, register snapshots to providers) | ✅ |
 | 5 | Policies, erasure coding, exotic adapters (Discord, transform stage) | — |
 
 ## Install
@@ -82,9 +82,10 @@ cd web && npm install && npm run build && cd ..
 uv run scatterbox daemon                     # http://127.0.0.1:8420
 ```
 
-Open the URL — a first-run wizard walks you through choosing the master
-passphrase and adding providers (local folders or cloud accounts), then
-drops you into the explorer.
+Open the URL — the first-run screen offers **set up new** (choose the
+master passphrase, add providers) or **import existing** (your backup zip,
+vault + register files, or vault.json alone to recover from provider
+snapshots), then drops you into the explorer.
 
 **CLI:**
 
@@ -154,6 +155,24 @@ uv run scatterbox provider set gd --max-object-bytes 1048576   # chunks shrink t
 uv run scatterbox provider set od --capacity-bytes 5000000000  # use at most ~5 GB
 uv run scatterbox provider remove gd                           # guarded if replicas live there
 ```
+
+## Backup, moving machines, disaster recovery
+
+The register (where every chunk lives) + the vault (keys and credentials)
++ your passphrase are the whole archive — chunks never need re-uploading.
+
+- **Export:** `scatterbox export <dir>` (or the *export backup* button on
+  the providers tab — one zip). The register is encrypted under your master
+  key by default; `--plain` skips that.
+- **Import:** `scatterbox import <register> <vault>`, or pick *import
+  existing* on a fresh machine's first-run screen.
+- **Safety net:** the daemon automatically uploads an encrypted register
+  snapshot to your two most reliable providers ~20 s after changes settle
+  (CLI: `scatterbox snapshot`). Where it landed is recorded inside the
+  vault — so even if your disk dies, **vault.json + passphrase alone**
+  rebuild everything: `scatterbox restore --vault vault.json`, or hand the
+  wizard just the vault file. Keep a copy of vault.json somewhere safe; it
+  is always encrypted.
 
 ## Security model in one paragraph
 

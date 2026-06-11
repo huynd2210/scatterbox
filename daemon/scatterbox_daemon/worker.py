@@ -14,18 +14,28 @@ import json
 import os
 from pathlib import Path
 
-from scatterbox import pipeline, scrubber
+from scatterbox import pipeline, portability, scrubber
 from scatterbox.errors import ScatterboxError
 from scatterbox.placement import Policy
 from scatterbox_daemon.state import DaemonState
 
 _IDLE_POLL_S = 5.0  # fallback poll; normally the wake event fires first
+# Auto-snapshot debounce: snapshot the register this long after the last
+# mutation settles (PLAN.md §9 "after changes (debounced)"). Module-level so
+# tests can shrink it.
+SNAPSHOT_DEBOUNCE_S = 20.0
 
 
 async def run_worker(state: DaemonState) -> None:
     """Consume jobs until cancelled (daemon shutdown)."""
     while True:
-        row = state.register.claim_next_job()
+        try:
+            row = state.register.claim_next_job()
+        except Exception:
+            # e.g. the register connection was swapped by an import — back
+            # off one tick and retry rather than killing the worker
+            await asyncio.sleep(0.2)
+            continue
         if row is None:
             state.wake.clear()
             try:
@@ -34,6 +44,23 @@ async def run_worker(state: DaemonState) -> None:
                 pass
             continue
         await _run_job(state, row)
+
+
+async def run_snapshotter(state: DaemonState) -> None:
+    """Debounced register-snapshot loop: wait for a mutation, let changes
+    settle, then push the encrypted register to providers. Skips quietly
+    while locked (no master key) — the next unlocked mutation catches up."""
+    while True:
+        await state.dirty.wait()
+        await asyncio.sleep(SNAPSHOT_DEBOUNCE_S)
+        state.dirty.clear()
+        if state.vault is None:
+            continue
+        try:
+            names = await portability.snapshot_to_providers(state.register, state.vault)
+            await state.ws.broadcast({"type": "snapshot", "providers": names})
+        except ScatterboxError as exc:
+            await state.ws.broadcast({"type": "snapshot", "error": str(exc)})
 
 
 async def _run_job(state: DaemonState, row) -> None:
@@ -57,6 +84,7 @@ async def _run_job(state: DaemonState, row) -> None:
         )
         return
     state.register.finish_job(job_id, result=result)
+    state.dirty.set()  # every successful job mutated the register
     await state.ws.broadcast(
         {"type": "job", "id": job_id, "kind": kind, "state": "done",
          "payload": payload, "result": result}

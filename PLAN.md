@@ -202,9 +202,10 @@ FastAPI daemon, job queue, React explorer with virtualized listing, transfers pa
 *Verify:* browse operations <100 ms on a 50k-file index; uploads never block the UI; health/tier badges reflect injected failures within one scrub cycle.
 *Deviations:* no mkdir endpoint (directories are implicit S3-style; they appear via upload paths and move); downloads stream synchronously instead of through the job queue (the response *is* the transfer — only uploads/deletes/scrubs are jobs); job progress is transient (WebSocket + memory, not persisted in the jobs table); the web build is not committed — `npm run build` produces `web/dist`, which the daemon serves when present. All three gate criteria are automated tests (test_listing_and_move.py, test_daemon.py).
 
-**Phase 4 — Portability + recovery**
+**Phase 4 — Portability + recovery** ✅ **Complete (2026-06-11)**
 Export/import of register + vault (UI button + CLI), automatic encrypted register snapshots to providers, restore-from-snapshot flow.
 *Verify:* export on machine A, import on a clean environment → full access, byte-identical downloads. Separately: destroy the local register, recover from passphrase + provider snapshot.
+*Deviations:* snapshot locations are recorded inside the vault (which already holds the credentials), so recovery = vault + passphrase — §9's alternate "re-auth one provider and find the snapshot by name" discovery path is not implemented (would need a `find()` adapter method; add if ever needed). Auto-snapshot (debounced ~20 s after mutations) runs in the daemon only; CLI users snapshot explicitly via `scatterbox snapshot`. The UI export is one zip containing the two §9 files; the first-run wizard offers set-up-new vs import (zip, vault+register, or vault-only → provider-snapshot recovery). Both gates are automated tests (test_portability.py, test_daemon.py) and were also exercised live end-to-end.
 
 **Phase 5 — Policies, erasure coding, exotic adapters**
 Per-folder policies UI, `ec(k,n)` scheme, transform-stage implementations (Discord first — it's a normal adapter with small `max_object_bytes`; then the YouTube-class transform when you supply the method).

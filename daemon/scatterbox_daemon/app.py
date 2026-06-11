@@ -21,16 +21,19 @@ from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from scatterbox import onboarding, pipeline, vault
+import io
+import zipfile
+
+from scatterbox import onboarding, pipeline, portability, vault
 from scatterbox.errors import ScatterboxError, VPathNotFoundError, WrongPassphraseError
 from scatterbox.providers import create_provider
 from scatterbox.register import Register, derive_health
 from scatterbox_daemon.state import DaemonState
-from scatterbox_daemon.worker import cleanup_stale_spool, run_worker
+from scatterbox_daemon.worker import cleanup_stale_spool, run_snapshotter, run_worker
 
 
 def _state(request: Request) -> DaemonState:
@@ -55,11 +58,13 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         if rescued:
             cleanup_stale_spool(state)
         state.worker = asyncio.create_task(run_worker(state))
+        state.snapshotter = asyncio.create_task(run_snapshotter(state))
         app.state.sb = state
         yield
-        state.worker.cancel()
-        with suppress(asyncio.CancelledError):
-            await state.worker
+        for task in (state.worker, state.snapshotter):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         state.register.close()
 
     app = FastAPI(title="scatterbox daemon", lifespan=lifespan)
@@ -89,6 +94,107 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             vault.create_vault, state.home / "vault.json", passphrase
         )
         return {"initialized": True, "locked": False}
+
+    @app.post("/api/import")
+    async def import_backup(
+        request: Request,
+        files: list[UploadFile],
+        passphrase: str = Form(...),
+    ):
+        """First-run import (the other half of the setup choice): accepts
+        the export zip, or vault + register files, or the vault alone —
+        which triggers recovery from a provider snapshot. Parts are told
+        apart by content, never by filename."""
+        state = _state(request)
+        if (state.home / "vault.json").is_file():
+            raise HTTPException(status_code=409, detail="already initialized")
+
+        vault_bytes: bytes | None = None
+        register_blob: bytes | None = None
+
+        def classify(data: bytes) -> None:
+            nonlocal vault_bytes, register_blob
+            if data.startswith(b"PK\x03\x04"):  # export zip: extract members
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    for member in zf.namelist():
+                        classify(zf.read(member))
+            elif data.startswith((b"SBSNAP1\n", b"SQLite format 3\x00")):
+                register_blob = data
+            else:
+                try:
+                    if "kdf" in json.loads(data):
+                        vault_bytes = data
+                        return
+                except (ValueError, UnicodeDecodeError):
+                    pass
+                raise HTTPException(
+                    status_code=400,
+                    detail="unrecognized file — expected the export zip, a "
+                    "vault.json, or a register snapshot/database",
+                )
+
+        for f in files:
+            classify(await f.read())
+        if vault_bytes is None:
+            raise HTTPException(status_code=400, detail="no vault.json among the files")
+
+        # The daemon holds the (empty, pre-init) register open; release it
+        # around the file swap and reopen whatever the import installed.
+        state.register.close()
+        try:
+            if register_blob is not None:
+                v, count = await asyncio.to_thread(
+                    portability.import_archive,
+                    state.home,
+                    vault_bytes=vault_bytes,
+                    register_blob=register_blob,
+                    passphrase=passphrase,
+                    force=True,  # pre-init register.db is disposable
+                )
+                source = "files"
+            else:
+                # vault only: unlock it, then recover from provider snapshots
+                tmp = state.home / "vault.json.import"
+                tmp.write_bytes(vault_bytes)
+                try:
+                    v = await asyncio.to_thread(vault.unlock_vault, tmp, passphrase)
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                os.replace(tmp, state.home / "vault.json")
+                v.path = state.home / "vault.json"
+                count, source = await portability.restore_register_from_snapshot(
+                    state.home, v, force=True
+                )
+        except WrongPassphraseError:
+            raise HTTPException(status_code=401, detail="wrong passphrase")
+        except ScatterboxError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        finally:
+            state.register = Register(state.home / "register.db")
+        state.vault = v  # imported and already unlocked — straight to the explorer
+        return {"files": count, "restored_from": source}
+
+    @app.get("/api/export")
+    async def export_backup(request: Request):
+        """One zip: the always-encrypted vault + an encrypted register
+        snapshot. With the passphrase, this is the whole archive."""
+        state = _state(request)
+        _require_unlocked(state)
+        snapshot = portability.encrypt_snapshot(
+            portability.register_bytes(state.register), state.vault.master_key
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:  # already compressed
+            zf.writestr("register.sbsnap", snapshot)
+            zf.writestr("vault.json", (state.home / "vault.json").read_bytes())
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="scatterbox-backup.zip"'
+            },
+        )
 
     @app.post("/api/unlock")
     async def unlock(request: Request, body: dict):
@@ -201,6 +307,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             moved = pipeline.move_path(state.register, body["src"], body["dst"])
         except ScatterboxError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
+        state.dirty.set()
         await state.ws.broadcast({"type": "files-changed"})
         return {"moved": moved}
 
@@ -384,6 +491,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 )
         except ScatterboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        state.dirty.set()
         await state.ws.broadcast({"type": "files-changed"})
         return {"name": name, "type": type_}
 
@@ -400,6 +508,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         except ScatterboxError as exc:
             # replica-guard refusals and unknown names both land here
             raise HTTPException(status_code=409, detail=str(exc))
+        state.dirty.set()
         await state.ws.broadcast({"type": "files-changed"})
         return {"removed": name, "replicas_dropped": dropped}
 

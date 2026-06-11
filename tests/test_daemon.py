@@ -298,6 +298,89 @@ def test_oauth_provider_add_via_api(client, monkeypatch):
     assert any(p["name"] == "gd" for p in client.get("/api/providers").json())
 
 
+def test_export_zip_and_import_on_fresh_home(client, home, tmp_path):
+    """Phase 4 via the API: export one zip, import it into a clean home,
+    download byte-identical."""
+    assert client.get("/api/export").status_code == 423  # locked: no key, no zip
+    unlock(client)
+    data = b"take me with you" * 3000
+    resp = client.post(
+        "/api/upload", files={"file": ("keep.bin", data)}, data={"path": "/docs/"}
+    )
+    assert wait_job(client, resp.json()["job_id"])["state"] == "done"
+
+    resp = client.get("/api/export")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    backup = resp.content
+
+    home_b = tmp_path / "home_b"
+    home_b.mkdir()
+    with TestClient(create_app(home_b)) as client_b:
+        assert client_b.get("/api/status").json()["initialized"] is False
+        # wrong passphrase is a clean 401, home stays uninitialized
+        resp = client_b.post(
+            "/api/import",
+            files={"files": ("backup.zip", backup)},
+            data={"passphrase": "wrong"},
+        )
+        assert resp.status_code == 401
+        assert client_b.get("/api/status").json()["initialized"] is False
+
+        resp = client_b.post(
+            "/api/import",
+            files={"files": ("backup.zip", backup)},
+            data={"passphrase": PASS},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"files": 1, "restored_from": "files"}
+        # imported AND unlocked — straight into the explorer
+        status = client_b.get("/api/status").json()
+        assert status["initialized"] is True and status["locked"] is False
+        listing = client_b.get("/api/files", params={"path": "/docs"}).json()
+        assert [f["name"] for f in listing["files"]] == ["keep.bin"]
+        assert client_b.get("/api/download", params={"path": "/docs/keep.bin"}).content == data
+
+
+def test_auto_snapshot_then_vault_only_recovery(home, tmp_path, monkeypatch):
+    """The safety net end to end: a mutation triggers a debounced snapshot;
+    later, vault.json + passphrase alone rebuild a working home."""
+    from scatterbox import portability, vault as vault_mod
+    from scatterbox_daemon import worker
+
+    monkeypatch.setattr(worker, "SNAPSHOT_DEBOUNCE_S", 0.05)
+    data = b"survives the apocalypse" * 2000
+    with TestClient(create_app(home)) as client:
+        unlock(client)
+        resp = client.post(
+            "/api/upload", files={"file": ("a.bin", data)}, data={"path": "/"}
+        )
+        assert wait_job(client, resp.json()["job_id"])["state"] == "done"
+        # the debounced snapshotter persists locations into the vault file
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            v = vault_mod.unlock_vault(home / "vault.json", PASS)
+            if v.has_secret(portability.SNAPSHOT_SECRET):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("auto-snapshot never happened")
+
+    # new machine: nothing but the vault file and the passphrase
+    home_c = tmp_path / "home_c"
+    home_c.mkdir()
+    with TestClient(create_app(home_c)) as client_c:
+        resp = client_c.post(
+            "/api/import",
+            files={"files": ("vault.json", (home / "vault.json").read_bytes())},
+            data={"passphrase": PASS},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["files"] == 1 and body["restored_from"].startswith("p")
+        assert client_c.get("/api/download", params={"path": "/a.bin"}).content == data
+
+
 def test_status_counts(client):
     unlock(client)
     resp = client.post(
