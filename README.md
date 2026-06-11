@@ -34,9 +34,13 @@ does not make free tiers a place for irreplaceable data.
   (stored → suspect → lost), and re-replicates anything below its floor.
 - **Anti-colocation on demand.** By default each replica provider holds a
   full (encrypted) copy. `put --spread N` splits a file's chunks across N
-  disjoint provider groups instead, so no single provider ever holds the
-  whole file — a guarantee that survives repair. Costs ~N × replicas
-  providers; scatterbox tells you when you don't have enough.
+  shard groups instead, so no single provider ever holds the whole file — a
+  guarantee that survives repair. Two modes: `--spread-mode disjoint`
+  (default; a provider gets at most 1/N of the file, costs ~N × replicas
+  providers) and `--spread-mode packed` (cheapest: ⌈N×replicas⁄(N−1)⌉
+  providers — spread 3 × 2 replicas fits on 3), with `--spread-cap K` for
+  anywhere in between. Scatterbox tells you when you don't have enough
+  providers.
 - **Truth, highly visible.** `status` shows real per-file health (●●● /
   ●●○ / ●○○), `provider list` shows quota with confidence labels (exact /
   estimated / unknown) — free space is never presented as more precise than

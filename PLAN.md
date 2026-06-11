@@ -118,14 +118,20 @@ A **policy** is attached per-file (inherited from folder, defaulting from global
 - `replicas: int` (default 3)
 - `allowed_tiers`: e.g. "hot only" for stuff you'll re-download often, "anything" for cold archives
 - `pinned_providers` / `excluded_providers`
-- `min_spread: int` (default 1) — anti-colocation, see below
+- `min_spread: int` (default 1) + `spread_mode`/`spread_cap` — anti-colocation, see below
 - (later) `erasure: k_of_n` as an alternative to plain replication
 
 Placement engine scores candidate providers: free capacity, reliability score, latency class vs policy, diversity (never two replicas on the same provider account). Starts as a simple weighted sort — no genius algorithm needed yet.
 
 **Reliability-weighted replicas:** the replica count is a *per-chunk floor*, not a ceiling. If a chunk's best available homes are low-reliability providers, the placement engine adds extra replicas there to hit an effective durability target — e.g. a chunk on Drive+OneDrive gets 2 copies, while one forced onto two Discord-class providers gets 3–4.
 
-**Anti-colocation (`min_spread`):** since providers are hostile, plain replication has a quiet downside: every replica provider holds a complete (encrypted) copy of the file. `min_spread: N` forbids that — the file's chunks are dealt round-robin across N *disjoint* provider groups, so no single provider ever holds more than ~1/N of the file's ciphertext. Files smaller than N chunks get their chunk size shrunk so they still split into N pieces. The cost is honest: each group must independently meet the replica floor, so ~N x replicas usable providers are needed; when too few exist, the user is told to add providers or accept less spread. The guarantee survives repair: each chunk's group is recorded in the register, and re-replication never targets a provider holding another group's chunks. Default 1 — i.e. trusting a provider with full (encrypted) colocation is allowed unless the user opts in.
+**Anti-colocation (`min_spread`, `spread_mode`/`spread_cap`):** since providers are hostile, plain replication has a quiet downside: every replica provider holds a complete (encrypted) copy of the file. `min_spread: N` forbids that — the file's chunks are dealt round-robin across N shard groups, and no provider may hold more than K of those groups, so every provider misses at least one piece of the file. Two named modes for K, plus an explicit override:
+
+- `disjoint` (default): K=1 — a provider holds at most ~1/N of the file; costs ~N×R usable providers.
+- `packed`: K=N−1 — the weakest guarantee that still denies a full copy (a provider may hold up to (N−1)/N); cheapest at P ≥ ⌈N×R⁄(N−1)⌉ (e.g. spread 3 × 2 replicas fits on 3 providers via the rotation table S1:{P1,P2}, S2:{P2,P3}, S3:{P3,P1}).
+- `spread_cap: K`: anywhere between, P ≥ max(R, ⌈N×R⁄K⌉).
+
+Per-chunk replicas stay on distinct providers regardless (the diversity rule), so a provider death still costs each chunk at most one replica — but note the packed blast radius: one death can degrade up to N−1 groups at once. Files smaller than N chunks get their chunk size shrunk so they still split into N pieces. Selection is a load-balanced greedy (pinned > least groups held > score) which reaches the bound for interchangeable providers; heterogeneous quotas/pins may need more, and infeasibility tells the user to add providers or accept less spread. The guarantee survives repair: each chunk's group and the file's K are recorded in the register, and re-replication never pushes a provider past the cap. Default `min_spread` 1 — trusting a provider with full (encrypted) colocation is allowed unless the user opts in.
 
 **Replication vs erasure coding:** start with full replicas (simple, debuggable, fine at MVP scale). The manifest schema includes a `scheme` field (`replica` | `ec(k,n)`) so erasure coding slots in later without migration pain.
 
@@ -210,4 +216,4 @@ Per-folder policies UI, `ec(k,n)` scheme, transform-stage implementations (Disco
 5. ✅ No dedup. Two identical files = two full copies; dedup is the user's job.
 6. ✅ Files >10 GB soft-blocked by default; advanced setting lifts the cap. Sharding via chunking handles large files across providers.
 7. ✅ Free-space reporting uses quota confidence levels (exact/estimated/unknown) — never presented as more precise than it is.
-8. ✅ Anti-colocation is opt-in per file (`min_spread`, CLI `--spread N`): chunks split across N disjoint provider groups so no provider holds a full ciphertext copy; infeasible spread tells the user to add providers or lower N (added 2026-06-11, after Phase 2).
+8. ✅ Anti-colocation is opt-in per file (`min_spread`, CLI `--spread N`): chunks split across N shard groups with a per-provider cap K so no provider holds a full ciphertext copy. Two modes — `disjoint` (K=1, strongest, default) and `packed` (K=N−1, cheapest: P ≥ ⌈NR⁄(N−1)⌉) — plus explicit `--spread-cap K`; infeasible spread tells the user to add providers or lower N/loosen K (added 2026-06-11, after Phase 2; packed model and provider-minimum formula by the user).

@@ -109,7 +109,9 @@ def put(
     ],
     vpath: Annotated[str, typer.Argument(help="Target virtual path; trailing / means directory.")],
     replicas: Annotated[int, typer.Option(min=1, help="Replica floor across distinct providers.")] = pipeline.DEFAULT_REPLICAS,
-    spread: Annotated[int, typer.Option(min=1, help="Split chunks across N disjoint provider groups so no single provider ever holds the whole file (needs ~N x replicas providers).")] = 1,
+    spread: Annotated[int, typer.Option(min=1, help="Split chunks across N provider shard groups so no single provider ever holds the whole file.")] = 1,
+    spread_mode: Annotated[str, typer.Option(help="disjoint: a provider holds at most 1 group (max 1/N of the file, needs ~N x replicas providers); packed: up to N-1 groups (cheapest, needs ~ceil(N x replicas/(N-1)) providers).")] = "disjoint",
+    spread_cap: Annotated[Optional[int], typer.Option(min=1, help="Explicit max shard groups per provider (1..N-1); overrides --spread-mode.")] = None,
     pin: Annotated[Optional[list[str]], typer.Option(help="Provider name to always include (repeatable).")] = None,
     exclude: Annotated[Optional[list[str]], typer.Option(help="Provider name to never use (repeatable).")] = None,
     force_large: Annotated[bool, typer.Option("--force-large", help="Lift the 10 GB soft cap.")] = False,
@@ -122,6 +124,8 @@ def put(
         pinned=frozenset(pin or ()),
         excluded=frozenset(exclude or ()),
         min_spread=spread,
+        spread_mode=spread_mode,
+        spread_cap=spread_cap,
     )
     try:
         result = asyncio.run(
@@ -143,7 +147,7 @@ def put(
         f"stored {result.vpath} ({_human(result.size)}, "
         f"{result.chunk_count} chunk(s) x {result.replicas} replicas"
         + (
-            f", split across {result.spread} disjoint provider groups"
+            f", split across {result.spread} provider shard groups"
             if result.spread > 1
             else ""
         )

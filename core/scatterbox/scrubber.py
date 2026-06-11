@@ -185,13 +185,14 @@ async def repair_chunks(
             if r["state"] == "stored"
         ]
         exclude_ids = {r["provider_id"] for r in replicas if r["state"] == "pending"}
-        # Anti-colocation must survive repair: providers holding chunks from
-        # other spread groups of this file can never receive this chunk, or
-        # they would creep toward a complete copy over repair cycles.
+        # Anti-colocation must survive repair: a provider already at the
+        # file's spread cap (groups-per-provider limit) can never receive a
+        # chunk from a new group, or it would creep toward a complete copy
+        # over repair cycles.
         if chunk["min_spread"] > 1:
             exclude_ids.update(
                 register.spread_conflict_providers(
-                    chunk["manifest_id"], chunk["spread_group"]
+                    chunk["manifest_id"], chunk["spread_group"], chunk["spread_cap"]
                 )
             )
         try:

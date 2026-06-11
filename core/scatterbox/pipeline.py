@@ -264,6 +264,7 @@ async def put_file(
         replica_target=policy.replicas,
         chunk_rows=chunk_rows,
         min_spread=policy.min_spread,
+        spread_cap=policy.resolved_spread_cap(),
     )
     return PutResult(
         file_id=file_id,

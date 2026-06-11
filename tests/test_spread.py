@@ -164,6 +164,129 @@ def test_repair_respects_spread(register, tmp_path):
     assert dst.read_bytes() == src.read_bytes()
 
 
+# -- packed mode / configurable cap ------------------------------------------
+
+
+def provider_group_counts(reg) -> dict[int, int]:
+    """provider_id -> number of distinct spread groups it holds (non-lost)."""
+    rows = reg.conn.execute(
+        """SELECT r.provider_id, COUNT(DISTINCT c.spread_group) AS n
+           FROM replicas r JOIN chunks c ON c.id = r.chunk_id
+           WHERE r.state != 'lost' GROUP BY r.provider_id"""
+    ).fetchall()
+    return {row["provider_id"]: row["n"] for row in rows}
+
+
+def test_packed_reaches_the_theoretical_minimum(register, tmp_path):
+    """Spread 3 x 2 replicas on exactly ceil(3*2/2) = 3 providers — the
+    rotation-table example: each provider holds 2 of 3 shard groups."""
+    add_localfs_providers(register, tmp_path, 3)
+    src = tmp_path / "f.bin"
+    data = os.urandom(300_000)
+    src.write_bytes(data)
+    result = put(
+        register, src, "/f.bin",
+        policy=Policy(replicas=2, min_spread=3, spread_mode="packed"),
+        chunk_size=64 * 1024,
+    )
+    assert result.spread == 3 and result.chunk_count >= 3
+
+    # nobody holds all 3 groups (= the whole file), nobody exceeds the cap
+    counts = provider_group_counts(register)
+    assert all(n <= 2 for n in counts.values())
+    every = all_chunk_hashes(register)
+    for held in provider_chunk_map(register).values():
+        assert held < every
+    # no duplicated replicas: each chunk's replicas sit on distinct providers
+    dup = register.conn.execute(
+        """SELECT chunk_id FROM replicas WHERE state != 'lost'
+           GROUP BY chunk_id, provider_id HAVING COUNT(*) > 1"""
+    ).fetchall()
+    assert dup == []
+
+    dst = tmp_path / "restored.bin"
+    get(register, "/f.bin", dst)
+    assert dst.read_bytes() == data
+
+
+def test_packed_still_fails_below_the_minimum(register, tmp_path):
+    add_localfs_providers(register, tmp_path, 2)  # ceil(3*2/2) = 3 needed
+    src = tmp_path / "f.bin"
+    src.write_bytes(os.urandom(10_000))
+    with pytest.raises(NotEnoughProvidersError, match="Add providers"):
+        put(
+            register, src, "/f.bin",
+            policy=Policy(replicas=2, min_spread=3, spread_mode="packed"),
+        )
+
+
+def test_explicit_cap_between_the_modes(register, tmp_path):
+    """spread 4, cap 2: stronger than packed (cap 3), cheaper than disjoint
+    (4x2=8 providers) — ceil(4*2/2) = 4 providers suffice."""
+    add_localfs_providers(register, tmp_path, 4)
+    src = tmp_path / "f.bin"
+    src.write_bytes(os.urandom(400_000))
+    put(
+        register, src, "/f.bin",
+        policy=Policy(replicas=2, min_spread=4, spread_cap=2),
+        chunk_size=64 * 1024,
+    )
+    counts = provider_group_counts(register)
+    assert all(n <= 2 for n in counts.values())
+    every = all_chunk_hashes(register)
+    for held in provider_chunk_map(register).values():
+        assert held < every
+
+
+def test_invalid_cap_and_mode_are_rejected(register, tmp_path):
+    add_localfs_providers(register, tmp_path, 6)
+    src = tmp_path / "f.bin"
+    src.write_bytes(os.urandom(10_000))
+    # cap = min_spread would allow a provider to hold the whole file
+    with pytest.raises(ScatterboxError, match="spread cap must be between"):
+        put(register, src, "/f.bin", policy=Policy(replicas=1, min_spread=2, spread_cap=2))
+    with pytest.raises(ScatterboxError, match="unknown spread mode"):
+        put(register, src, "/f.bin", policy=Policy(replicas=1, min_spread=2, spread_mode="cosy"))
+
+
+def test_repair_respects_packed_cap(register, tmp_path):
+    """With cap 2 of 3 groups, repair must not push any provider to a third
+    group even when that provider is otherwise the best candidate."""
+    add_localfs_providers(register, tmp_path, 4)  # min 3 + 1 spare
+    src = tmp_path / "f.bin"
+    src.write_bytes(os.urandom(256_000))
+    put(
+        register, src, "/f.bin",
+        policy=Policy(replicas=2, min_spread=3, spread_mode="packed"),
+        chunk_size=64 * 1024,
+    )
+    counts_before = provider_group_counts(register)
+
+    # destroy one replica's bytes on disk
+    victim = register.conn.execute(
+        """SELECT r.id, r.provider_id, r.remote_ref FROM replicas r
+           JOIN chunks c ON c.id = r.chunk_id
+           WHERE c.spread_group = 0 ORDER BY r.id LIMIT 1"""
+    ).fetchone()
+    root = json.loads(register.get_provider(victim["provider_id"])["config"])["root"]
+    os.remove(os.path.join(root, victim["remote_ref"]))
+
+    report = asyncio.run(scrubber.scrub(register, repair=True))
+    assert report.repaired >= 1 and not report.unrepairable
+    assert register.chunks_below_floor() == []
+
+    # the cap still holds for every provider, and nobody has a full copy
+    counts_after = provider_group_counts(register)
+    assert all(n <= 2 for n in counts_after.values()), (counts_before, counts_after)
+    every = all_chunk_hashes(register)
+    for held in provider_chunk_map(register).values():
+        assert held < every
+
+    dst = tmp_path / "restored.bin"
+    get(register, "/f.bin", dst)
+    assert dst.read_bytes() == src.read_bytes()
+
+
 def test_v2_database_upgrades_with_defaults(tmp_path):
     """Pre-spread registers (user_version 2) gain the new columns with
     no-constraint defaults."""
@@ -177,7 +300,7 @@ def test_v2_database_upgrades_with_defaults(tmp_path):
 
     reg = Register(db)
     cols = {r[1] for r in reg.conn.execute("PRAGMA table_info(manifests)")}
-    assert "min_spread" in cols
+    assert "min_spread" in cols and "spread_cap" in cols
     cols = {r[1] for r in reg.conn.execute("PRAGMA table_info(chunks)")}
     assert "spread_group" in cols
     reg.close()
@@ -204,7 +327,7 @@ def test_cli_spread_flag(tmp_path, monkeypatch):
         app, ["put", str(src), "/f.bin", "--replicas", "2", "--spread", "2"]
     )
     assert result.exit_code == 0, result.output
-    assert "split across 2 disjoint provider groups" in result.output
+    assert "split across 2 provider shard groups" in result.output
 
     # infeasible: spread 3 x floor 2 needs 6 providers, only 4 exist
     src2 = tmp_path / "g.bin"

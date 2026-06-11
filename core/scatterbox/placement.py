@@ -26,7 +26,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from scatterbox.errors import NotEnoughProvidersError
+from scatterbox.errors import NotEnoughProvidersError, ScatterboxError
 
 MAX_CHUNK_LOSS_PROB = 1e-3  # target: ≤0.1% chance all replicas of a chunk die
 MAX_EXTRA_REPLICAS = 2  # durability-chasing copies allowed beyond the floor
@@ -49,11 +49,38 @@ class Policy:
     allowed_tiers: frozenset[str] | None = None  # latency classes; None = any
     pinned: frozenset[str] = field(default_factory=frozenset)  # provider names
     excluded: frozenset[str] = field(default_factory=frozenset)
-    # Anti-colocation (PLAN.md §7): partition the file's chunks across this
-    # many DISJOINT provider groups, so no single provider ever holds a
-    # complete copy of the file — even as ciphertext. 1 = no constraint
-    # (every replica provider holds the whole file).
+    # Anti-colocation (PLAN.md §7): split the file's chunks into min_spread
+    # shard groups and limit how many of those groups any one provider may
+    # touch, so no provider ever holds a complete copy of the file — even as
+    # ciphertext. min_spread=1 = no constraint (every replica provider holds
+    # the whole file). How many groups one provider may hold:
+    #   spread_mode="disjoint"  -> 1 group   (≤1/N of the file; needs ~N×R
+    #                                          providers)
+    #   spread_mode="packed"    -> N-1 groups (no full copy, cheapest:
+    #                                          needs ~⌈N×R/(N-1)⌉ providers)
+    #   spread_cap=K            -> exactly K  (explicit; overrides the mode)
     min_spread: int = 1
+    spread_mode: str = "disjoint"
+    spread_cap: int | None = None
+
+    def resolved_spread_cap(self) -> int:
+        """The effective max number of shard groups per provider (K)."""
+        if self.min_spread <= 1:
+            return 1
+        if self.spread_mode not in ("disjoint", "packed"):
+            raise ScatterboxError(
+                f"unknown spread mode {self.spread_mode!r} (disjoint | packed)"
+            )
+        cap = self.spread_cap
+        if cap is None:
+            cap = 1 if self.spread_mode == "disjoint" else self.min_spread - 1
+        if not 1 <= cap <= self.min_spread - 1:
+            raise ScatterboxError(
+                f"spread cap must be between 1 and min_spread-1 "
+                f"({self.min_spread - 1}), got {cap} — a provider holding all "
+                f"{self.min_spread} groups would hold the whole file"
+            )
+        return cap
 
 
 @dataclass
@@ -74,6 +101,7 @@ async def select_targets(
     *,
     existing: Sequence[tuple[int, float]] = (),
     exclude_ids: Sequence[int] = (),
+    spread_load: dict[int, int] | None = None,
 ) -> list:
     """Choose providers for new replicas of one chunk.
 
@@ -81,8 +109,12 @@ async def select_targets(
     existing: (provider_id, reliability) of replicas the chunk already has
     alive — their providers are excluded (diversity) and their reliability
     counts toward the durability target. exclude_ids: further provider ids
-    to avoid (e.g. holders of suspect replicas). Returns only the *new*
-    targets.
+    to avoid (e.g. holders of suspect replicas). spread_load: shard-group
+    counts from select_spread_groups — lightly-loaded providers are
+    preferred ahead of score, which is what lets a packed spread placement
+    actually reach its theoretical provider minimum instead of cornering
+    itself (the top-scored providers would otherwise win every group and
+    hit their cap before the last one). Returns only the *new* targets.
     """
     # -- filtering: drop providers that can't or shouldn't hold this chunk --
     skip_ids = {pid for pid, _ in existing} | set(exclude_ids)
@@ -132,8 +164,12 @@ async def select_targets(
             + _WEIGHT_CAPACITY * capacity_frac
             + _WEIGHT_LATENCY * _LATENCY_FIT.get(c.latency_class, 0.0)
         )
-    # Sort: pinned first, then highest score, then id as a stable tiebreaker.
-    candidates.sort(key=lambda c: (not c.pinned, -c.score, c.handle.id))
+    # Sort: pinned first, then least spread-load (see docstring), then
+    # highest score, then id as a stable tiebreaker.
+    load = spread_load or {}
+    candidates.sort(
+        key=lambda c: (not c.pinned, load.get(c.handle.id, 0), -c.score, c.handle.id)
+    )
 
     # -- selection: walk the ranked list, taking providers until satisfied --
     # `loss` is the probability that EVERY replica dies: the product of each
@@ -167,30 +203,48 @@ async def select_spread_groups(
     policy: Policy,
     stored_chunk_size: int,
 ) -> list[list]:
-    """Disjoint provider groups for anti-colocation (Policy.min_spread).
+    """Provider groups for anti-colocation (Policy.min_spread / spread_cap).
 
-    Group g holds only the chunks assigned to it (chunk seq % min_spread),
-    and no provider appears in two groups — together that caps any single
-    provider at ~1/min_spread of the file. Disjointness is what makes the
-    guarantee real: a provider in two groups would accumulate both groups'
-    chunks. The price is honest: min_spread groups that each meet the
-    replica floor need roughly min_spread x replicas usable providers.
+    The file's chunks are dealt round-robin across min_spread shard groups
+    (chunk seq % min_spread); each group gets its own target set meeting the
+    replica floor, and no provider may appear in more than K =
+    resolved_spread_cap() groups — so every provider misses at least one
+    group, i.e. nobody ever holds a complete copy of the file.
+
+    Provider cost is K-dependent: each group needs `replicas` distinct
+    providers and a provider offers at most K group slots, so roughly
+    max(replicas, ceil(min_spread x replicas / K)) usable providers are
+    needed — min_spread x replicas for disjoint (K=1), down to
+    ceil(min_spread x replicas / (min_spread-1)) for packed. Selection is a
+    load-balanced greedy: it achieves that bound for interchangeable
+    providers, but heterogeneous quotas/pins may need more — failure is
+    loud either way.
     """
+    n = max(policy.min_spread, 1)
+    if n == 1:
+        return [await select_targets(handles, policy, stored_chunk_size)]
+    cap = policy.resolved_spread_cap()
     groups: list[list] = []
-    used: list[int] = []
-    for _ in range(max(policy.min_spread, 1)):
+    load: dict[int, int] = {}  # provider id -> shard groups held so far
+    for _ in range(n):
+        at_cap = [pid for pid, count in load.items() if count >= cap]
         try:
             targets = await select_targets(
-                handles, policy, stored_chunk_size, exclude_ids=used
+                handles,
+                policy,
+                stored_chunk_size,
+                exclude_ids=at_cap,
+                spread_load=load,
             )
         except NotEnoughProvidersError as exc:
+            needed = max(policy.replicas, math.ceil(n * policy.replicas / cap))
             raise NotEnoughProvidersError(
-                f"cannot spread the file across {policy.min_spread} disjoint "
-                f"provider groups of {policy.replicas} replica(s) each "
-                f"(~{policy.min_spread * policy.replicas} usable providers "
-                f"needed): {exc}. Add providers, or accept less spread by "
-                "lowering --spread"
+                f"cannot spread the file across {n} provider groups with at "
+                f"most {cap} group(s) per provider (~{needed} usable "
+                f"providers needed): {exc}. Add providers, or accept less "
+                "spread by lowering --spread or using --spread-mode packed"
             ) from exc
         groups.append(targets)
-        used.extend(t.id for t in targets)
+        for t in targets:
+            load[t.id] = load.get(t.id, 0) + 1
     return groups

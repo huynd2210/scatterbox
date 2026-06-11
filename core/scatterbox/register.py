@@ -108,6 +108,12 @@ _MIGRATIONS = [
     ALTER TABLE manifests ADD COLUMN min_spread INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE chunks ADD COLUMN spread_group INTEGER NOT NULL DEFAULT 0;
     """,
+    # v4 — spread cap K: how many of the file's shard groups one provider
+    # may hold (1 = disjoint groups, min_spread-1 = packed; PLAN.md §7).
+    # Existing spread files were written with disjoint groups, hence DEFAULT 1.
+    """
+    ALTER TABLE manifests ADD COLUMN spread_cap INTEGER NOT NULL DEFAULT 1;
+    """,
 ]
 
 # Replica lifecycle (TASKS.md §3). Same-state transitions are idempotent no-ops;
@@ -277,6 +283,7 @@ class Register:
         replica_target: int,
         chunk_rows: list[tuple[int, str, int, int, bool, int, list[tuple[int, str]]]],
         min_spread: int = 1,
+        spread_cap: int = 1,
     ) -> int:
         """Record a fully-uploaded file: file + manifest + chunks + replicas.
 
@@ -294,9 +301,11 @@ class Register:
             file_id = cur.lastrowid
             cur = self.conn.execute(
                 """INSERT INTO manifests
-                   (file_id, scheme, wrapped_file_key, chunk_size, replica_target, min_spread)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (file_id, scheme, wrapped_file_key, chunk_size, replica_target, min_spread),
+                   (file_id, scheme, wrapped_file_key, chunk_size, replica_target,
+                    min_spread, spread_cap)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (file_id, scheme, wrapped_file_key, chunk_size, replica_target,
+                 min_spread, spread_cap),
             )
             manifest_id = cur.lastrowid
             for seq, chunk_hash, stored_size, plain_size, compressed, group, refs in chunk_rows:
@@ -461,7 +470,7 @@ class Register:
         return self.conn.execute(
             """
             SELECT c.id AS chunk_row_id, c.seq, c.chunk_hash, c.stored_size,
-                   c.manifest_id, c.spread_group, m.min_spread,
+                   c.manifest_id, c.spread_group, m.min_spread, m.spread_cap,
                    m.replica_target, f.vpath,
                    SUM(CASE WHEN r.state = 'stored' THEN 1 ELSE 0 END) AS live
             FROM chunks c
@@ -474,23 +483,32 @@ class Register:
             """
         ).fetchall()
 
-    def spread_conflict_providers(self, manifest_id: int, spread_group: int) -> list[int]:
-        """Providers holding a non-lost replica of a chunk in a DIFFERENT
-        spread group of this file.
+    def spread_conflict_providers(
+        self, manifest_id: int, spread_group: int, spread_cap: int
+    ) -> list[int]:
+        """Providers that must not receive a chunk of this spread group.
 
-        Repair must never give these providers a chunk from this group —
-        cross-group accumulation is exactly what min_spread forbids, and the
-        guarantee has to survive years of scrub/repair cycles, not just the
-        original placement. Suspect replicas count too: a deep verify can
-        rehabilitate them.
+        The invariant (PLAN.md §7) is "at most spread_cap of the file's
+        shard groups per provider". A provider already inside this group can
+        take more of its chunks freely; a provider outside it is barred once
+        it already holds spread_cap OTHER groups — accepting would push it
+        over, and with cap = min_spread-1 that literally means completing a
+        full copy. The guarantee has to survive years of scrub/repair
+        cycles, not just the original placement. Suspect replicas count as
+        held: a deep verify can rehabilitate them.
         """
         rows = self.conn.execute(
             """
-            SELECT DISTINCT r.provider_id
+            SELECT r.provider_id,
+                   MAX(CASE WHEN c.spread_group = :g THEN 1 ELSE 0 END) AS in_group,
+                   COUNT(DISTINCT CASE WHEN c.spread_group != :g
+                                       THEN c.spread_group END) AS other_groups
             FROM replicas r JOIN chunks c ON c.id = r.chunk_id
-            WHERE c.manifest_id = ? AND c.spread_group != ? AND r.state != 'lost'
+            WHERE c.manifest_id = :m AND r.state != 'lost'
+            GROUP BY r.provider_id
+            HAVING in_group = 0 AND other_groups >= :cap
             """,
-            (manifest_id, spread_group),
+            {"m": manifest_id, "g": spread_group, "cap": spread_cap},
         ).fetchall()
         return [row["provider_id"] for row in rows]
 
