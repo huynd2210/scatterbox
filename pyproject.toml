@@ -1,0 +1,31 @@
+[project]
+name = "scatterbox"
+version = "0.1.0"
+description = "Distributed free-tier cloud storage: encrypted chunks scattered across unreliable providers"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=42",
+    "blake3>=0.4",
+    "zstandard>=0.22",
+    "argon2-cffi>=23",
+    "typer>=0.12",
+]
+
+[project.scripts]
+scatterbox = "scatterbox_cli.main:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core/scatterbox", "cli/scatterbox_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
