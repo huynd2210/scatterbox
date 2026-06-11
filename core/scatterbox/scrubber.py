@@ -36,6 +36,8 @@ from scatterbox.register import Register
 
 @dataclass
 class ScrubReport:
+    """Tally of one scrub/repair run — what the CLI prints at the end."""
+
     probed: int = 0  # replicas examined (cheap or deep)
     confirmed: int = 0  # cheap probes that passed
     deep_verified: int = 0  # downloads that hashed clean
@@ -46,7 +48,12 @@ class ScrubReport:
 
 
 def _demote(register: Register, replica, report: ScrubReport) -> None:
-    """One failed observation: stored/pending → suspect, suspect → lost."""
+    """One failed observation: stored/pending → suspect, suspect → lost.
+
+    Two-strike rule: a single failure might be a transient outage, so it
+    only raises suspicion; failing again while already suspect is the
+    second strike, and the replica is written off.
+    """
     if replica["state"] in ("stored", "pending"):
         register.set_replica_state(replica["id"], "suspect")
         report.marked_suspect += 1
@@ -56,12 +63,16 @@ def _demote(register: Register, replica, report: ScrubReport) -> None:
 
 
 async def _probe(register: Register, handle: ProviderHandle, replica, report) -> None:
+    """Cheap check: ask the provider if the object exists, without downloading."""
     try:
         ok = await handle.instance.exists(RemoteRef(replica["remote_ref"]))
     except Exception:
-        ok = False
+        ok = False  # an unreachable provider counts as a failed observation
     if ok:
         report.confirmed += 1
+        # Note the condition: a *suspect* replica is NOT rehabilitated here.
+        # exists() proves an object with that name is there, not that its
+        # bytes are intact — only a deep verify can clear suspicion.
         if replica["state"] in ("stored", "pending"):
             register.mark_replica_verified(replica["id"])
     else:
@@ -70,6 +81,7 @@ async def _probe(register: Register, handle: ProviderHandle, replica, report) ->
 
 
 async def _deep_verify(register: Register, handle, replica, report) -> None:
+    """Expensive check: download the object and hash it against the register."""
     try:
         obj = await handle.instance.get(RemoteRef(replica["remote_ref"]))
     except Exception:
@@ -100,7 +112,9 @@ async def scrub(
     for the rest. repair=True: re-replicate below-floor chunks afterwards."""
     handles = {h.id: h for h in load_providers(register)}
     report = ScrubReport()
-    spent = 0
+    spent = 0  # download bytes used so far against deep_budget_bytes
+    # replicas_for_scrub yields oldest-verified first, so each cycle attends
+    # to whatever has gone longest unchecked (the "rotating" scrub).
     for replica in register.replicas_for_scrub(limit=probe_limit):
         handle = handles[replica["provider_id"]]
         report.probed += 1
@@ -111,6 +125,8 @@ async def scrub(
             spent += replica["stored_size"]
             await _deep_verify(register, handle, replica, report)
         else:
+            # not in deep mode, or this replica would blow the byte budget —
+            # fall back to the cheap existence probe
             await _probe(register, handle, replica, report)
     if repair:
         await repair_chunks(register, report)
@@ -120,7 +136,13 @@ async def scrub(
 async def repair_chunks(
     register: Register, report: ScrubReport | None = None
 ) -> ScrubReport:
-    """Bring every chunk back to its replica floor (TASKS.md §5)."""
+    """Bring every chunk back to its replica floor (TASKS.md §5).
+
+    For each below-floor chunk: fetch its ciphertext from any surviving
+    replica, ask the placement engine for new homes, upload. Works entirely
+    on ciphertext — repair never needs the passphrase, so a daemon can run
+    it unattended.
+    """
     report = report if report is not None else ScrubReport()
     handles = load_providers(register)
     by_id = {h.id: h for h in handles}
@@ -177,6 +199,8 @@ async def repair_chunks(
                 continue
             register.add_replica(chunk["chunk_row_id"], target.id, ref.value)
             report.repaired += 1
+            # The fresh copy supersedes any suspect row this provider held
+            # for the same chunk — retire the old row so it can't be counted.
             for stale in replicas:
                 if stale["provider_id"] == target.id and stale["state"] == "suspect":
                     register.set_replica_state(stale["id"], "lost")

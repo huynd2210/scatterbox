@@ -1,9 +1,18 @@
 """Data pipeline: chunk → compress → encrypt → hash → replicate (PLAN.md §5).
 
+This is the heart of scatterbox — what actually happens when you `put` or
+`get` a file. On the way up, a file is cut into fixed-size chunks, each chunk
+is compressed (only if that helps), encrypted with the file's key, hashed,
+and uploaded to several providers chosen by the placement engine. On the way
+down the same steps run in reverse, trying each replica until one verifies.
+
 Usable as a library — the daemon imports these same functions in Phase 3.
 Stored object layout: nonce(12) || AES-256-GCM ciphertext+tag(16).
-chunk_hash = BLAKE3 of the stored object; the per-chunk `compressed` flag
-lives in the (trusted, local) register.
+chunk_hash = BLAKE3 of the stored object (i.e. of the ciphertext), so a
+replica can be health-checked *without* decrypting it — no master key needed
+for scrubbing. The per-chunk `compressed` flag lives in the (trusted, local)
+register rather than in the stored object, so providers learn nothing about
+the data, not even whether it compressed.
 """
 
 from __future__ import annotations
@@ -32,11 +41,11 @@ from scatterbox.placement import Policy
 from scatterbox.providers import Provider, RemoteRef, create_provider
 from scatterbox.register import Register, derive_health
 
-DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024
+DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB plaintext per chunk
 CHUNK_OVERHEAD = keys.NONCE_LEN + 16  # nonce + GCM tag added per stored object
-SOFT_MAX_FILE_BYTES = 10 * 1024**3
+SOFT_MAX_FILE_BYTES = 10 * 1024**3  # 10 GB guard rail; --force-large lifts it
 DEFAULT_REPLICAS = 3
-_ZSTD_LEVEL = 3
+_ZSTD_LEVEL = 3  # zstd's default-ish sweet spot: decent ratio, fast
 
 
 def normalize_vpath(vpath: str, *, basename: str | None = None) -> str:
@@ -56,6 +65,9 @@ def normalize_vpath(vpath: str, *, basename: str | None = None) -> str:
 
 @dataclass(frozen=True)
 class ProviderHandle:
+    """A provider as the pipeline sees it: the live adapter plus the register
+    metadata (row id, name, learned reliability) bundled together."""
+
     id: int
     name: str
     instance: Provider
@@ -73,6 +85,7 @@ class PutResult:
 
 
 def load_providers(register: Register) -> list[ProviderHandle]:
+    """Rehydrate every registered provider row into a live adapter handle."""
     handles = []
     for row in register.list_providers():
         instance = create_provider(row["type"], json.loads(row["config"]))
@@ -93,7 +106,12 @@ def _file_size(path: Path) -> int:
 
 
 def _effective_chunk_size(targets: list[ProviderHandle], chunk_size: int) -> int:
-    """Size chunks down so the stored object fits every target's max_object_bytes."""
+    """Size chunks down so the stored object fits every target's max_object_bytes.
+
+    E.g. with a Discord-class 10 MB object cap, an 8 MiB chunk fits, but a
+    user-requested 16 MiB chunk would be shrunk to cap minus CHUNK_OVERHEAD
+    (the stored object is chunk + nonce + tag, so the overhead must fit too).
+    """
     limits = [
         h.instance.profile().max_object_bytes
         for h in targets
@@ -110,6 +128,7 @@ def _effective_chunk_size(targets: list[ProviderHandle], chunk_size: int) -> int
 
 
 async def _cleanup_uploads(uploaded: list[tuple[Provider, RemoteRef]]) -> None:
+    """Undo a half-finished put: delete whatever was already uploaded."""
     for provider, ref in uploaded:
         try:
             await provider.delete(ref)
@@ -128,7 +147,17 @@ async def put_file(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     force_large: bool = False,
 ) -> PutResult:
-    """`replicas` is shorthand for Policy(replicas=...); pass one or the other."""
+    """Store a local file at a virtual path. The write path, start to finish.
+
+    Order of operations matters for crash safety: all chunks are uploaded
+    FIRST, and only then is the file recorded in the register (in one
+    transaction). A crash mid-put therefore leaves at worst some orphaned
+    ciphertext on providers — never a register entry pointing at missing
+    chunks. The except block below cleans up those orphans when the failure
+    is one we get to see.
+
+    `replicas` is shorthand for Policy(replicas=...); pass one or the other.
+    """
     if policy is None:
         policy = Policy(replicas=replicas if replicas is not None else DEFAULT_REPLICAS)
     elif replicas is not None:
@@ -145,11 +174,14 @@ async def put_file(
             "pass --force-large to store it anyway"
         )
 
+    # Pick the providers once for the whole file; every chunk goes to the
+    # same set (per-chunk placement comes later, with repair).
     targets = await placement.select_targets(
         load_providers(register), policy, chunk_size + CHUNK_OVERHEAD
     )
     eff_chunk_size = _effective_chunk_size(targets, chunk_size)
 
+    # Fresh random key for this file (see keys.py for why per-file keys).
     file_key = os.urandom(keys.KEY_LEN)
     aes = AESGCM(file_key)
     compressor = zstandard.ZstdCompressor(level=_ZSTD_LEVEL)
@@ -161,15 +193,21 @@ async def put_file(
         with open(local_path, "rb") as f:
             seq = 0
             while True:
+                # Stream the file one chunk at a time — a 10 GB file never
+                # needs more than one chunk's worth of memory.
                 plain = f.read(eff_chunk_size)
                 if not plain:
                     break
                 compressed = compressor.compress(plain)
                 use_compressed = len(compressed) < len(plain)  # skip if incompressible
                 payload = compressed if use_compressed else plain
+                # Compress BEFORE encrypting — ciphertext looks random and
+                # doesn't compress. Fresh nonce per chunk (GCM rule: never
+                # reuse a nonce under the same key).
                 nonce = os.urandom(keys.NONCE_LEN)
                 obj = nonce + aes.encrypt(nonce, payload, None)
                 chunk_hash = blake3(obj).hexdigest()
+                # Upload this chunk to all targets concurrently.
                 refs = await asyncio.gather(
                     *(t.instance.put(chunk_hash, obj) for t in targets)
                 )
@@ -216,8 +254,16 @@ async def get_file(
     vpath: str,
     local_path: Path | str,
 ) -> None:
-    """Fetch each chunk from the first replica that verifies (BLAKE3 + GCM tag),
-    marking failed replicas suspect/missing, and reassemble byte-identically."""
+    """Restore a file: the read path.
+
+    For each chunk, replicas are tried healthiest-first until one passes ALL
+    the checks — fetch succeeded, BLAKE3 hash matches, GCM tag verifies,
+    decompressed size is right. Every failed attempt marks that replica
+    suspect and dings the provider's reliability score, so reads double as
+    health observations. Output goes to a .part temp file that is atomically
+    renamed only when every byte checked out — the destination never holds a
+    partial file.
+    """
     vpath = normalize_vpath(vpath)
     rec = register.get_file_with_manifest(vpath)
     if rec is None:
@@ -226,7 +272,7 @@ async def get_file(
     file_key = keys.unwrap_key(master_key, rec["wrapped_file_key"])
     aes = AESGCM(file_key)
     decompressor = zstandard.ZstdDecompressor()
-    instances: dict[int, Provider] = {}
+    instances: dict[int, Provider] = {}  # provider adapters, created lazily
 
     local_path = Path(local_path)
     tmp = local_path.with_name(local_path.name + ".part")
@@ -237,7 +283,7 @@ async def get_file(
                 plain = None
                 for replica in register.get_replicas(chunk["id"]):
                     if replica["state"] == "lost":
-                        continue
+                        continue  # known-dead; not worth a network call
                     pid = replica["provider_id"]
                     if pid not in instances:
                         prow = register.get_provider(pid)
@@ -245,6 +291,8 @@ async def get_file(
                             prow["type"], json.loads(prow["config"])
                         )
                     prior = instances[pid].profile().reliability_prior
+                    # Four checks below, same pattern each time: on failure,
+                    # mark suspect + reliability down + try the next replica.
                     try:
                         obj = await instances[pid].get(RemoteRef(replica["remote_ref"]))
                     except Exception:
@@ -277,6 +325,8 @@ async def get_file(
                     plain = candidate
                     break
                 if plain is None:
+                    # every replica of this chunk failed — the file is
+                    # currently unrecoverable
                     raise ChunkUnavailableError(
                         f"chunk {chunk['seq']} of {vpath}: no replica verified"
                     )
@@ -286,8 +336,10 @@ async def get_file(
             raise ScatterboxError(
                 f"reassembled {written} bytes but expected {rec['size']}"
             )
-        os.replace(tmp, local_path)
+        os.replace(tmp, local_path)  # atomic: appears complete or not at all
     finally:
+        # On success the rename already moved it; this only removes leftovers
+        # from a failed run.
         tmp.unlink(missing_ok=True)
 
 
@@ -342,7 +394,13 @@ def file_status(register: Register, vpath: str) -> FileStatus:
 def list_dir(
     register: Register, vpath: str = "/"
 ) -> tuple[list[str], list[tuple[str, int]]]:
-    """Immediate children of a virtual directory: (subdir names, (file, size))."""
+    """Immediate children of a virtual directory: (subdir names, (file, size)).
+
+    There is no directory table — directories exist only implicitly as path
+    prefixes of stored files (like S3). So "list /docs" means: scan all
+    vpaths starting with "/docs/" and split what follows into direct files
+    vs first-level subdirectory names.
+    """
     vpath = normalize_vpath(vpath)
     exact = register.get_file(vpath)
     if exact is not None:

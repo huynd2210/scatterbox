@@ -1,7 +1,14 @@
 ﻿"""scatterbox CLI entry point.
 
+A thin Typer wrapper around the core library: every command opens the
+register, calls one pipeline/scrubber function, prints the result, and turns
+ScatterboxError into a red one-line error (exit code 1). No storage logic
+lives here — if a command seems to "do" something, the implementation is in
+core/scatterbox.
+
 Home directory: $SCATTERBOX_HOME or ~/.scatterbox (register.db + vault.json).
-Passphrase: $SCATTERBOX_PASSPHRASE or interactive prompt.
+Passphrase: $SCATTERBOX_PASSPHRASE or interactive prompt (the env var exists
+for tests and scripts; the prompt is the normal path).
 """
 
 from __future__ import annotations
@@ -23,8 +30,9 @@ from scatterbox.register import Register
 app = typer.Typer(
     help="scatterbox - distributed free-tier cloud storage.",
     no_args_is_help=True,
-    pretty_exceptions_show_locals=False,
+    pretty_exceptions_show_locals=False,  # never dump locals — may hold keys
 )
+# Sub-app gives the nested command style: `scatterbox provider add ...`
 provider_app = typer.Typer(help="Manage storage providers.", no_args_is_help=True)
 app.add_typer(provider_app, name="provider")
 
@@ -34,6 +42,7 @@ def _home() -> Path:
 
 
 def _fail(message: str) -> NoReturn:
+    """Print a red error to stderr and exit 1 (no traceback for known errors)."""
     typer.secho(f"error: {message}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
 
@@ -53,6 +62,8 @@ def _passphrase(confirm: bool = False) -> str:
 
 
 def _master_key() -> bytes:
+    """Prompt for the passphrase and unlock the vault (commands that need to
+    encrypt or decrypt call this; ls/status/rm don't need the key at all)."""
     try:
         return vault.unlock_vault(_home() / "vault.json", _passphrase()).master_key
     except ScatterboxError as exc:
@@ -60,6 +71,7 @@ def _master_key() -> bytes:
 
 
 def _human(n: int) -> str:
+    """Bytes -> '1.5 MiB'-style display string."""
     size = float(n)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if size < 1024 or unit == "TiB":
@@ -164,6 +176,7 @@ def status(vpath: Annotated[str, typer.Argument()]) -> None:
         _fail(str(exc))
     finally:
         register.close()
+    # PLAN.md §8's dot display: ●●○ = weakest chunk has 2 of 3 replicas alive
     dots = "●" * min(st.min_live, st.replica_target) + "○" * max(
         st.replica_target - st.min_live, 0
     )
@@ -201,6 +214,7 @@ def scrub(
         report = asyncio.run(
             scrubber.scrub(
                 register,
+                # giving a byte budget implies you want deep verification
                 deep=full or deep_budget_bytes is not None,
                 probe_limit=probe_limit,
                 deep_budget_bytes=deep_budget_bytes,

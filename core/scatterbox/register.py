@@ -1,7 +1,26 @@
 """Central register: SQLite (WAL) holding all metadata (PLAN.md §9).
 
-Contains wrapped file keys but no secrets — useless without the vault.
-Migrations are versioned scripts applied via PRAGMA user_version.
+This is "the crown jewel": it knows where every chunk of every file lives.
+Lose it and the ciphertext scattered across providers is garbage. It holds
+wrapped (encrypted) file keys but no secrets — useless without the vault.
+
+How the tables relate (one row each, top to bottom):
+
+    files      "/docs/report.pdf"            — the virtual path tree
+      └─ manifests   how that file is stored — chunk size, wrapped key, floor
+           └─ chunks      one per 8 MiB slice — BLAKE3 hash, sizes, seq order
+                └─ replicas   one per copy of a chunk — which provider, what
+                              ref, lifecycle state, when last seen alive
+    providers  one per configured backend (type + JSON config + learned stats)
+    jobs       background job queue (used from Phase 3 onwards)
+
+SQLite specifics:
+- WAL (write-ahead logging) journal mode lets readers keep reading while a
+  write is in progress — needed later when the daemon and CLI share the DB.
+- Migrations are plain SQL scripts applied in order; PRAGMA user_version
+  records how many have run, so old databases upgrade automatically.
+- row_factory = sqlite3.Row makes query results behave like dicts
+  (row["vpath"]) instead of bare tuples.
 """
 
 from __future__ import annotations
@@ -14,33 +33,35 @@ from pathlib import Path
 from scatterbox.errors import ScatterboxError
 
 _MIGRATIONS = [
-    # v1 — initial schema
+    # v1 — initial schema (Phase 0)
     """
     CREATE TABLE files (
         id         INTEGER PRIMARY KEY,
-        vpath      TEXT NOT NULL UNIQUE,
-        size       INTEGER NOT NULL,
-        mtime      REAL NOT NULL,
+        vpath      TEXT NOT NULL UNIQUE,   -- virtual path, e.g. /docs/a.pdf
+        size       INTEGER NOT NULL,       -- plaintext size in bytes
+        mtime      REAL NOT NULL,          -- source file's modification time
         created_at REAL NOT NULL
     );
 
     CREATE TABLE manifests (
         id               INTEGER PRIMARY KEY,
+        -- ON DELETE CASCADE: deleting a file row automatically deletes its
+        -- manifest, which cascades to chunks, which cascades to replicas.
         file_id          INTEGER NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
-        scheme           TEXT NOT NULL DEFAULT 'replica',
-        wrapped_file_key BLOB NOT NULL,
-        chunk_size       INTEGER NOT NULL,
-        replica_target   INTEGER NOT NULL
+        scheme           TEXT NOT NULL DEFAULT 'replica',  -- later: 'ec(k,n)'
+        wrapped_file_key BLOB NOT NULL,    -- file key encrypted by master key
+        chunk_size       INTEGER NOT NULL, -- plaintext bytes per chunk
+        replica_target   INTEGER NOT NULL  -- the per-chunk replica floor
     );
 
     CREATE TABLE chunks (
         id          INTEGER PRIMARY KEY,
         manifest_id INTEGER NOT NULL REFERENCES manifests(id) ON DELETE CASCADE,
-        seq         INTEGER NOT NULL,
-        chunk_hash  TEXT NOT NULL,
-        stored_size INTEGER NOT NULL,
-        plain_size  INTEGER NOT NULL,
-        compressed  INTEGER NOT NULL DEFAULT 0,
+        seq         INTEGER NOT NULL,      -- position within the file (0, 1, 2…)
+        chunk_hash  TEXT NOT NULL,         -- BLAKE3 of the stored ciphertext
+        stored_size INTEGER NOT NULL,      -- bytes actually uploaded
+        plain_size  INTEGER NOT NULL,      -- bytes after decrypt+decompress
+        compressed  INTEGER NOT NULL DEFAULT 0,  -- was zstd worth it for this chunk
         UNIQUE (manifest_id, seq)
     );
 
@@ -48,18 +69,18 @@ _MIGRATIONS = [
         id            INTEGER PRIMARY KEY,
         chunk_id      INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
         provider_id   INTEGER NOT NULL REFERENCES providers(id),
-        remote_ref    TEXT NOT NULL,
-        state         TEXT NOT NULL DEFAULT 'ok',
-        last_verified REAL
+        remote_ref    TEXT NOT NULL,       -- provider's handle for the object
+        state         TEXT NOT NULL DEFAULT 'ok',  -- lifecycle; see v2 below
+        last_verified REAL                 -- unix time of last successful check
     );
     CREATE INDEX idx_replicas_chunk ON replicas(chunk_id);
 
     CREATE TABLE providers (
         id         INTEGER PRIMARY KEY,
-        name       TEXT NOT NULL UNIQUE,
-        type       TEXT NOT NULL,
-        config     TEXT NOT NULL,
-        profile    TEXT NOT NULL DEFAULT '{}',
+        name       TEXT NOT NULL UNIQUE,   -- user-chosen, e.g. "my-gdrive"
+        type       TEXT NOT NULL,          -- adapter type for create_provider()
+        config     TEXT NOT NULL,          -- JSON: root/limits/etc, no secrets
+        profile    TEXT NOT NULL DEFAULT '{}',  -- JSON: learned stats (reliability)
         created_at REAL NOT NULL
     );
 
@@ -73,6 +94,8 @@ _MIGRATIONS = [
     );
     """,
     # v2 — Phase 1 replica lifecycle: pending → stored → suspect → lost
+    # (renames Phase 0's ad-hoc states; new rows always set state explicitly,
+    # so the old DEFAULT 'ok' in the v1 DDL is harmless leftover)
     """
     UPDATE replicas SET state = 'stored' WHERE state = 'ok';
     UPDATE replicas SET state = 'suspect' WHERE state = 'missing';
@@ -81,15 +104,22 @@ _MIGRATIONS = [
 
 # Replica lifecycle (TASKS.md §3). Same-state transitions are idempotent no-ops;
 # 'lost' is terminal — repair creates new rows instead of resurrecting old ones.
+#
+#   pending  — placement decided, upload not yet confirmed
+#   stored   — uploaded and verified at some point
+#   suspect  — one failed observation (missed probe, fetch error, bad bytes)
+#   lost     — gone for good (second strike, or definitive corruption)
 _REPLICA_TRANSITIONS = {
     "pending": {"stored", "suspect", "lost"},
     "stored": {"suspect", "lost"},
-    "suspect": {"stored", "lost"},
+    "suspect": {"stored", "lost"},  # a deep verify can clear suspicion
     "lost": set(),
 }
 
 # Reliability EMA (TASKS.md §3): successful verify nudges the score up
 # slightly; a missed probe / corrupt chunk / 404 drags it down sharply.
+# (EMA = exponential moving average: new = (1-a)*old + a*observation, where
+# the observation is 1.0 for success, 0.0 for failure.)
 RELIABILITY_ALPHA_UP = 0.05
 RELIABILITY_ALPHA_DOWN = 0.30
 
@@ -99,12 +129,13 @@ class Register:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
-        self.conn.row_factory = sqlite3.Row
+        self.conn.row_factory = sqlite3.Row  # rows addressable by column name
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA foreign_keys=ON")  # off by default in SQLite!
         self._migrate()
 
     def _migrate(self) -> None:
+        # user_version starts at 0; run every script we have beyond it.
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         for i, script in enumerate(_MIGRATIONS[version:], start=version + 1):
             self.conn.executescript(script)
@@ -123,6 +154,7 @@ class Register:
                 (name, type_, json.dumps(config), time.time()),
             )
         except sqlite3.IntegrityError as exc:
+            # the UNIQUE constraint on name fired
             raise ScatterboxError(f"provider {name!r} already exists") from exc
         self.conn.commit()
         return cur.lastrowid
@@ -139,14 +171,18 @@ class Register:
         return row
 
     def update_provider_config(self, provider_id: int, config: dict) -> None:
-        with self.conn:
+        with self.conn:  # "with conn" = run inside a transaction, commit on exit
             self.conn.execute(
                 "UPDATE providers SET config = ? WHERE id = ?",
                 (json.dumps(config), provider_id),
             )
 
     def get_reliability(self, provider_id: int, *, prior: float) -> float:
-        """Learned reliability score, or the profile prior if never observed."""
+        """Learned reliability score, or the profile prior if never observed.
+
+        The score lives in the providers.profile JSON column; the prior comes
+        from the adapter's ProviderProfile and is only the starting point.
+        """
         stats = json.loads(self.get_provider(provider_id)["profile"] or "{}")
         score = stats.get("reliability_score")
         return prior if score is None else score
@@ -155,6 +191,7 @@ class Register:
         """EMA update from one scrub/read observation; returns the new score."""
         stats = json.loads(self.get_provider(provider_id)["profile"] or "{}")
         score = stats.get("reliability_score", prior)
+        # Asymmetric: trust is gained slowly (alpha 0.05) and lost fast (0.30).
         alpha = RELIABILITY_ALPHA_UP if ok else RELIABILITY_ALPHA_DOWN
         score = (1 - alpha) * score + alpha * (1.0 if ok else 0.0)
         stats["reliability_score"] = score
@@ -173,6 +210,8 @@ class Register:
         ).fetchone()
 
     def get_file_with_manifest(self, vpath: str) -> sqlite3.Row | None:
+        """File row joined with its manifest — everything the read path needs
+        in one query."""
         return self.conn.execute(
             """
             SELECT f.id AS file_id, f.vpath, f.size, f.mtime,
@@ -200,8 +239,13 @@ class Register:
         replica_target: int,
         chunk_rows: list[tuple[int, str, int, int, bool, list[tuple[int, str]]]],
     ) -> int:
-        """chunk_rows: (seq, chunk_hash, stored_size, plain_size, compressed,
-        [(provider_id, remote_ref), ...]). One transaction."""
+        """Record a fully-uploaded file: file + manifest + chunks + replicas.
+
+        chunk_rows: (seq, chunk_hash, stored_size, plain_size, compressed,
+        [(provider_id, remote_ref), ...]). Runs as ONE transaction — either
+        the whole file becomes visible in the register or none of it does;
+        a crash mid-insert can never leave a half-recorded file.
+        """
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO files (vpath, size, mtime, created_at) VALUES (?, ?, ?, ?)",
@@ -224,6 +268,8 @@ class Register:
                 )
                 chunk_row_id = cur.lastrowid
                 for provider_id, remote_ref in refs:
+                    # uploads happen before this insert, so replicas are
+                    # born 'stored', not 'pending'
                     self.conn.execute(
                         """INSERT INTO replicas (chunk_id, provider_id, remote_ref, state)
                            VALUES (?, ?, ?, 'stored')""",
@@ -234,6 +280,7 @@ class Register:
     def add_replica(
         self, chunk_row_id: int, provider_id: int, remote_ref: str, state: str = "stored"
     ) -> int:
+        """Record one new copy of a chunk (used by repair after re-uploading)."""
         with self.conn:
             cur = self.conn.execute(
                 """INSERT INTO replicas (chunk_id, provider_id, remote_ref, state, last_verified)
@@ -243,18 +290,21 @@ class Register:
         return cur.lastrowid
 
     def delete_file(self, file_id: int) -> None:
+        # The ON DELETE CASCADEs take the manifest, chunks and replicas with it.
         with self.conn:
             self.conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
 
     # -- chunks / replicas ----------------------------------------------------
 
     def get_chunks(self, manifest_id: int) -> list[sqlite3.Row]:
+        # ORDER BY seq: the read path concatenates these in order.
         return self.conn.execute(
             "SELECT * FROM chunks WHERE manifest_id = ? ORDER BY seq", (manifest_id,)
         ).fetchall()
 
     def get_replicas(self, chunk_row_id: int) -> list[sqlite3.Row]:
-        """Healthiest replicas first."""
+        """Healthiest replicas first — the read path tries them in this order,
+        so it normally never touches a suspect copy."""
         return self.conn.execute(
             """SELECT * FROM replicas WHERE chunk_id = ?
                ORDER BY CASE state
@@ -264,6 +314,7 @@ class Register:
         ).fetchall()
 
     def replicas_for_file(self, file_id: int) -> list[sqlite3.Row]:
+        """Every replica of every chunk of a file (used by rm to delete them)."""
         return self.conn.execute(
             """
             SELECT r.* FROM replicas r
@@ -275,7 +326,11 @@ class Register:
         ).fetchall()
 
     def set_replica_state(self, replica_id: int, state: str) -> None:
-        """Validated lifecycle transition (same-state is an idempotent no-op)."""
+        """Validated lifecycle transition (same-state is an idempotent no-op).
+
+        Centralizing the check here means no caller can accidentally e.g.
+        resurrect a 'lost' replica — the state machine is enforced in one place.
+        """
         if state not in _REPLICA_TRANSITIONS:
             raise ScatterboxError(f"unknown replica state {state!r}")
         row = self.conn.execute(
@@ -296,6 +351,8 @@ class Register:
             )
 
     def mark_replica_verified(self, replica_id: int) -> None:
+        """A successful observation: move to 'stored' and stamp last_verified
+        (which pushes this replica to the back of the scrub queue)."""
         self.set_replica_state(replica_id, "stored")
         with self.conn:
             self.conn.execute(
@@ -306,7 +363,13 @@ class Register:
     # -- durability ------------------------------------------------------------
 
     def min_live_replicas(self, manifest_id: int) -> int:
-        """Stored-replica count of the file's weakest chunk."""
+        """Stored-replica count of the file's weakest chunk.
+
+        A file is only as durable as its worst chunk — losing any single
+        chunk loses the file. The inner SELECT counts 'stored' replicas per
+        chunk (LEFT JOIN so a chunk with zero replicas still appears, as 0);
+        the outer MIN takes the weakest.
+        """
         row = self.conn.execute(
             """
             SELECT MIN(cnt) AS min_live FROM (
@@ -329,7 +392,14 @@ class Register:
 
     def replicas_for_scrub(self, limit: int | None = None) -> list[sqlite3.Row]:
         """Non-lost replicas with their chunk hash/size, oldest last_verified
-        first (never-verified before everything else)."""
+        first (never-verified before everything else).
+
+        This ordering is what makes the scrub "rotating": each cycle checks
+        the replicas that have gone longest without a health check, and
+        verifying one pushes it to the back of the queue.
+        (In SQLite, `x IS NOT NULL` is 0 for NULL and 1 otherwise, so NULLs —
+        never verified — sort first.)
+        """
         sql = """
             SELECT r.*, c.chunk_hash, c.stored_size
             FROM replicas r JOIN chunks c ON c.id = r.chunk_id
@@ -342,7 +412,12 @@ class Register:
 
     def chunks_below_floor(self) -> list[sqlite3.Row]:
         """Chunks whose stored-replica count is under the manifest's floor,
-        weakest first."""
+        weakest first — repair's work list.
+
+        GROUP BY chunk, count its 'stored' replicas, keep only the groups
+        where that count is under replica_target (HAVING filters groups the
+        way WHERE filters rows). vpath/seq ride along for error messages.
+        """
         return self.conn.execute(
             """
             SELECT c.id AS chunk_row_id, c.seq, c.chunk_hash, c.stored_size,
@@ -359,6 +434,7 @@ class Register:
         ).fetchall()
 
     def replica_state_counts(self, manifest_id: int) -> dict[str, int]:
+        """How many of a file's replicas are in each state (for `status`)."""
         rows = self.conn.execute(
             """
             SELECT r.state, COUNT(*) AS n
@@ -372,6 +448,11 @@ class Register:
 
 
 def derive_health(min_live: int, replica_target: int) -> str:
+    """Weakest-chunk replica count -> the health word shown to the user.
+
+    With the default floor of 3 this maps to PLAN.md §8's dots:
+    3+ -> healthy (●●●), 2 -> degraded (●●○), 1 -> at-risk (●○○), 0 -> lost.
+    """
     if min_live >= replica_target:
         return "healthy"
     if min_live == 0:

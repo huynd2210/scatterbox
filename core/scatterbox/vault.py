@@ -1,9 +1,16 @@
 """Secret vault — Phase 0 stub (PLAN.md §9).
 
 Phase 2 replaces this with the full encrypted vault file (master key +
-provider credentials/OAuth tokens). For now the file stores only the Argon2id
-KDF parameters and an encrypted check value used to verify the passphrase;
-the master key is re-derived on unlock and never written to disk.
+provider credentials/OAuth tokens). For now the file stores only:
+
+- the Argon2id KDF parameters (salt + work factors) needed to re-derive the
+  master key from the passphrase, and
+- an encrypted "check value" used to tell a wrong passphrase apart from a
+  right one at unlock time.
+
+The master key itself is never written to disk — it is re-derived on every
+unlock. Nothing in this JSON file is secret: the salt and KDF parameters are
+safe to expose; without the passphrase they are useless.
 """
 
 from __future__ import annotations
@@ -20,6 +27,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from scatterbox import keys
 from scatterbox.errors import ScatterboxError, WrongPassphraseError
 
+# A known plaintext encrypted under the master key at creation time. If a
+# later unlock can decrypt it (GCM tag verifies), the derived key — and thus
+# the passphrase — must be correct.
 _CHECK_PLAINTEXT = b"scatterbox-vault-check-v1"
 _CHECK_AAD = b"vault-check"
 _SALT_LEN = 16
@@ -46,6 +56,9 @@ def create_vault(
     memory_cost: int = keys.DEFAULT_MEMORY_COST,
     parallelism: int = keys.DEFAULT_PARALLELISM,
 ) -> Vault:
+    """First-time setup: pick a random salt, derive the master key, write the
+    vault JSON. Refuses to overwrite an existing vault (that would orphan
+    every already-encrypted file)."""
     path = Path(path)
     if path.exists():
         raise ScatterboxError(f"vault already exists at {path}")
@@ -57,12 +70,14 @@ def create_vault(
         memory_cost=memory_cost,
         parallelism=parallelism,
     )
+    # Encrypt the check value now so unlock_vault can verify passphrases later.
     nonce = os.urandom(keys.NONCE_LEN)
     check = nonce + AESGCM(master_key).encrypt(nonce, _CHECK_PLAINTEXT, _CHECK_AAD)
     doc = {
         "version": 1,
         "kdf": {
             "algo": "argon2id",
+            # bytes can't go in JSON, hence base64
             "salt": base64.b64encode(salt).decode(),
             "time_cost": time_cost,
             "memory_cost": memory_cost,
@@ -76,6 +91,8 @@ def create_vault(
 
 
 def unlock_vault(path: Path | str, passphrase: str) -> Vault:
+    """Re-derive the master key using the stored KDF parameters, then prove
+    the passphrase right by decrypting the check value."""
     path = Path(path)
     if not path.is_file():
         raise ScatterboxError(f"no vault at {path}; run 'scatterbox init' first")
@@ -90,6 +107,7 @@ def unlock_vault(path: Path | str, passphrase: str) -> Vault:
     )
     check = base64.b64decode(doc["check"])
     try:
+        # Wrong passphrase -> wrong key -> GCM tag mismatch -> InvalidTag.
         AESGCM(master_key).decrypt(check[: keys.NONCE_LEN], check[keys.NONCE_LEN :], _CHECK_AAD)
     except InvalidTag as exc:
         raise WrongPassphraseError("wrong passphrase") from exc
