@@ -184,14 +184,23 @@ async def repair_chunks(
             for r in replicas
             if r["state"] == "stored"
         ]
-        pending_ids = [r["provider_id"] for r in replicas if r["state"] == "pending"]
+        exclude_ids = {r["provider_id"] for r in replicas if r["state"] == "pending"}
+        # Anti-colocation must survive repair: providers holding chunks from
+        # other spread groups of this file can never receive this chunk, or
+        # they would creep toward a complete copy over repair cycles.
+        if chunk["min_spread"] > 1:
+            exclude_ids.update(
+                register.spread_conflict_providers(
+                    chunk["manifest_id"], chunk["spread_group"]
+                )
+            )
         try:
             targets = await placement.select_targets(
                 handles,
                 Policy(replicas=chunk["replica_target"]),
                 chunk["stored_size"],
                 existing=existing,
-                exclude_ids=pending_ids,
+                exclude_ids=list(exclude_ids),
             )
         except NotEnoughProvidersError as exc:
             report.unrepairable.append(f"{label}: {exc}")

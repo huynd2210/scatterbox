@@ -100,6 +100,14 @@ _MIGRATIONS = [
     UPDATE replicas SET state = 'stored' WHERE state = 'ok';
     UPDATE replicas SET state = 'suspect' WHERE state = 'missing';
     """,
+    # v3 — anti-colocation (Policy.min_spread): which disjoint provider group
+    # each chunk belongs to, and the file's spread requirement, so repair can
+    # keep honoring the guarantee long after the original placement.
+    # Pre-existing files default to 1/0: no constraint, all chunks group 0.
+    """
+    ALTER TABLE manifests ADD COLUMN min_spread INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE chunks ADD COLUMN spread_group INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 # Replica lifecycle (TASKS.md §3). Same-state transitions are idempotent no-ops;
@@ -246,7 +254,7 @@ class Register:
             """
             SELECT f.id AS file_id, f.vpath, f.size, f.mtime,
                    m.id AS manifest_id, m.scheme, m.wrapped_file_key,
-                   m.chunk_size, m.replica_target
+                   m.chunk_size, m.replica_target, m.min_spread
             FROM files f JOIN manifests m ON m.file_id = f.id
             WHERE f.vpath = ?
             """,
@@ -267,14 +275,16 @@ class Register:
         wrapped_file_key: bytes,
         chunk_size: int,
         replica_target: int,
-        chunk_rows: list[tuple[int, str, int, int, bool, list[tuple[int, str]]]],
+        chunk_rows: list[tuple[int, str, int, int, bool, int, list[tuple[int, str]]]],
+        min_spread: int = 1,
     ) -> int:
         """Record a fully-uploaded file: file + manifest + chunks + replicas.
 
         chunk_rows: (seq, chunk_hash, stored_size, plain_size, compressed,
-        [(provider_id, remote_ref), ...]). Runs as ONE transaction — either
-        the whole file becomes visible in the register or none of it does;
-        a crash mid-insert can never leave a half-recorded file.
+        spread_group, [(provider_id, remote_ref), ...]). Runs as ONE
+        transaction — either the whole file becomes visible in the register
+        or none of it does; a crash mid-insert can never leave a
+        half-recorded file.
         """
         with self.conn:
             cur = self.conn.execute(
@@ -284,17 +294,17 @@ class Register:
             file_id = cur.lastrowid
             cur = self.conn.execute(
                 """INSERT INTO manifests
-                   (file_id, scheme, wrapped_file_key, chunk_size, replica_target)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (file_id, scheme, wrapped_file_key, chunk_size, replica_target),
+                   (file_id, scheme, wrapped_file_key, chunk_size, replica_target, min_spread)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (file_id, scheme, wrapped_file_key, chunk_size, replica_target, min_spread),
             )
             manifest_id = cur.lastrowid
-            for seq, chunk_hash, stored_size, plain_size, compressed, refs in chunk_rows:
+            for seq, chunk_hash, stored_size, plain_size, compressed, group, refs in chunk_rows:
                 cur = self.conn.execute(
                     """INSERT INTO chunks
-                       (manifest_id, seq, chunk_hash, stored_size, plain_size, compressed)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (manifest_id, seq, chunk_hash, stored_size, plain_size, int(compressed)),
+                       (manifest_id, seq, chunk_hash, stored_size, plain_size, compressed, spread_group)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (manifest_id, seq, chunk_hash, stored_size, plain_size, int(compressed), group),
                 )
                 chunk_row_id = cur.lastrowid
                 for provider_id, remote_ref in refs:
@@ -451,6 +461,7 @@ class Register:
         return self.conn.execute(
             """
             SELECT c.id AS chunk_row_id, c.seq, c.chunk_hash, c.stored_size,
+                   c.manifest_id, c.spread_group, m.min_spread,
                    m.replica_target, f.vpath,
                    SUM(CASE WHEN r.state = 'stored' THEN 1 ELSE 0 END) AS live
             FROM chunks c
@@ -462,6 +473,26 @@ class Register:
             ORDER BY live, c.id
             """
         ).fetchall()
+
+    def spread_conflict_providers(self, manifest_id: int, spread_group: int) -> list[int]:
+        """Providers holding a non-lost replica of a chunk in a DIFFERENT
+        spread group of this file.
+
+        Repair must never give these providers a chunk from this group —
+        cross-group accumulation is exactly what min_spread forbids, and the
+        guarantee has to survive years of scrub/repair cycles, not just the
+        original placement. Suspect replicas count too: a deep verify can
+        rehabilitate them.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT r.provider_id
+            FROM replicas r JOIN chunks c ON c.id = r.chunk_id
+            WHERE c.manifest_id = ? AND c.spread_group != ? AND r.state != 'lost'
+            """,
+            (manifest_id, spread_group),
+        ).fetchall()
+        return [row["provider_id"] for row in rows]
 
     def replica_state_counts(self, manifest_id: int) -> dict[str, int]:
         """How many of a file's replicas are in each state (for `status`)."""

@@ -83,6 +83,7 @@ class PutResult:
     chunk_count: int
     chunk_size: int
     replicas: int
+    spread: int = 1  # disjoint provider groups the chunks are split across
 
 
 def load_providers(
@@ -181,19 +182,33 @@ async def put_file(
             "pass --force-large to store it anyway"
         )
 
-    # Pick the providers once for the whole file; every chunk goes to the
-    # same set (per-chunk placement comes later, with repair).
-    targets = await placement.select_targets(
+    # Pick the providers once for the whole file. Without spread there is a
+    # single group and every chunk goes to the same set; with min_spread > 1
+    # the groups are disjoint and chunks are dealt round-robin across them,
+    # so no provider ever assembles a complete (ciphertext) copy.
+    groups = await placement.select_spread_groups(
         load_providers(register, secrets), policy, chunk_size + CHUNK_OVERHEAD
     )
-    eff_chunk_size = _effective_chunk_size(targets, chunk_size)
+    eff_chunk_size = _effective_chunk_size(
+        [t for group in groups for t in group], chunk_size
+    )
+    if policy.min_spread > 1 and size > 0:
+        if size < policy.min_spread:
+            raise ScatterboxError(
+                f"{local_path} is only {size} byte(s) — too small to split "
+                f"across {policy.min_spread} provider groups"
+            )
+        # A file must have at least min_spread chunks for the guarantee to
+        # mean anything (a single-chunk file would hand every replica holder
+        # the whole file) — shrink the chunk size if needed.
+        eff_chunk_size = min(eff_chunk_size, -(-size // policy.min_spread))
 
     # Fresh random key for this file (see keys.py for why per-file keys).
     file_key = os.urandom(keys.KEY_LEN)
     aes = AESGCM(file_key)
     compressor = zstandard.ZstdCompressor(level=_ZSTD_LEVEL)
 
-    chunk_rows: list[tuple[int, str, int, int, bool, list[tuple[int, str]]]] = []
+    chunk_rows: list[tuple[int, str, int, int, bool, int, list[tuple[int, str]]]] = []
     uploaded: list[tuple[Provider, RemoteRef]] = []
     total_plain = 0
     try:
@@ -214,7 +229,10 @@ async def put_file(
                 nonce = os.urandom(keys.NONCE_LEN)
                 obj = nonce + aes.encrypt(nonce, payload, None)
                 chunk_hash = blake3(obj).hexdigest()
-                # Upload this chunk to all targets concurrently.
+                # Deal chunks round-robin across the spread groups (one group
+                # = today's behavior) and upload to that group concurrently.
+                group = seq % len(groups)
+                targets = groups[group]
                 refs = await asyncio.gather(
                     *(t.instance.put(chunk_hash, obj) for t in targets)
                 )
@@ -226,6 +244,7 @@ async def put_file(
                         len(obj),
                         len(plain),
                         use_compressed,
+                        group,
                         [(t.id, r.value) for t, r in zip(targets, refs)],
                     )
                 )
@@ -244,6 +263,7 @@ async def put_file(
         chunk_size=eff_chunk_size,
         replica_target=policy.replicas,
         chunk_rows=chunk_rows,
+        min_spread=policy.min_spread,
     )
     return PutResult(
         file_id=file_id,
@@ -251,7 +271,8 @@ async def put_file(
         size=total_plain,
         chunk_count=len(chunk_rows),
         chunk_size=eff_chunk_size,
-        replicas=len(targets),
+        replicas=min(len(g) for g in groups),
+        spread=len(groups),
     )
 
 

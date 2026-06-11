@@ -49,6 +49,11 @@ class Policy:
     allowed_tiers: frozenset[str] | None = None  # latency classes; None = any
     pinned: frozenset[str] = field(default_factory=frozenset)  # provider names
     excluded: frozenset[str] = field(default_factory=frozenset)
+    # Anti-colocation (PLAN.md §7): partition the file's chunks across this
+    # many DISJOINT provider groups, so no single provider ever holds a
+    # complete copy of the file — even as ciphertext. 1 = no constraint
+    # (every replica provider holds the whole file).
+    min_spread: int = 1
 
 
 @dataclass
@@ -155,3 +160,37 @@ async def select_targets(
             "— add providers, free space, or lower the replica floor"
         )
     return [c.handle for c in chosen]
+
+
+async def select_spread_groups(
+    handles: Sequence,
+    policy: Policy,
+    stored_chunk_size: int,
+) -> list[list]:
+    """Disjoint provider groups for anti-colocation (Policy.min_spread).
+
+    Group g holds only the chunks assigned to it (chunk seq % min_spread),
+    and no provider appears in two groups — together that caps any single
+    provider at ~1/min_spread of the file. Disjointness is what makes the
+    guarantee real: a provider in two groups would accumulate both groups'
+    chunks. The price is honest: min_spread groups that each meet the
+    replica floor need roughly min_spread x replicas usable providers.
+    """
+    groups: list[list] = []
+    used: list[int] = []
+    for _ in range(max(policy.min_spread, 1)):
+        try:
+            targets = await select_targets(
+                handles, policy, stored_chunk_size, exclude_ids=used
+            )
+        except NotEnoughProvidersError as exc:
+            raise NotEnoughProvidersError(
+                f"cannot spread the file across {policy.min_spread} disjoint "
+                f"provider groups of {policy.replicas} replica(s) each "
+                f"(~{policy.min_spread * policy.replicas} usable providers "
+                f"needed): {exc}. Add providers, or accept less spread by "
+                "lowering --spread"
+            ) from exc
+        groups.append(targets)
+        used.extend(t.id for t in targets)
+    return groups
