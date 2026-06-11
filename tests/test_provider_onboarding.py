@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 import scatterbox_cli.main as cli
+from scatterbox import oauth, onboarding
 from scatterbox.errors import ScatterboxError
 from scatterbox.providers import create_provider, requires_secrets
 from scatterbox.providers.base import Quota
@@ -71,12 +72,13 @@ def stub_oauth(monkeypatch):
         calls.update(kwargs)
         return dict(FAKE_BLOB)
 
-    monkeypatch.setattr(cli.oauth, "run_loopback_flow", fake_flow)
+    # onboarding (shared by CLI and daemon) calls oauth.run_loopback_flow
+    monkeypatch.setattr(oauth, "run_loopback_flow", fake_flow)
     return calls
 
 
 def test_gdrive_onboarding_happy_path(env, stub_oauth, monkeypatch):
-    monkeypatch.setattr(cli, "create_provider", lambda t, c, s=None: StubProvider())
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: StubProvider())
     _ok(
         runner.invoke(
             cli.app,
@@ -104,7 +106,7 @@ def test_gdrive_onboarding_happy_path(env, stub_oauth, monkeypatch):
 
 
 def test_onedrive_onboarding_has_no_client_secret(env, stub_oauth, monkeypatch):
-    monkeypatch.setattr(cli, "create_provider", lambda t, c, s=None: StubProvider())
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: StubProvider())
     _ok(
         runner.invoke(
             cli.app,
@@ -117,7 +119,7 @@ def test_onedrive_onboarding_has_no_client_secret(env, stub_oauth, monkeypatch):
 
 def test_failed_connection_test_rolls_back_the_secret(env, stub_oauth, monkeypatch):
     monkeypatch.setattr(
-        cli,
+        onboarding,
         "create_provider",
         lambda t, c, s=None: StubProvider(quota_exc=ScatterboxError("boom")),
     )

@@ -71,7 +71,22 @@ uv sync
 uv run scatterbox --help
 ```
 
-## Quickstart (local, no cloud accounts)
+## Quickstart
+
+Two setup paths, same result — pick one.
+
+**Web (zero CLI setup):**
+
+```sh
+cd web && npm install && npm run build && cd ..
+uv run scatterbox daemon                     # http://127.0.0.1:8420
+```
+
+Open the URL — a first-run wizard walks you through choosing the master
+passphrase and adding providers (local folders or cloud accounts), then
+drops you into the explorer.
+
+**CLI:**
 
 ```sh
 uv run scatterbox init                       # choose your master passphrase
@@ -119,7 +134,8 @@ version (details: TASKS.md §7):
   Microsoft accounts**, add `http://localhost` as a *Mobile and desktop*
   redirect URI. No client secret (public client + PKCE).
 
-Then:
+Then either add them in the web UI (providers tab → add provider — a
+consent tab opens in your browser) or via the CLI:
 
 ```sh
 uv run scatterbox provider add gd --type gdrive     # prompts id/secret, opens browser

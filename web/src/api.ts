@@ -3,6 +3,7 @@ import type {
   Health,
   Job,
   Listing,
+  NewProvider,
   ProviderInfo,
   Status,
 } from "./types";
@@ -30,6 +31,7 @@ const json = (body: unknown): RequestInit => ({
 
 export const api = {
   status: () => request<Status>("/api/status"),
+  init: (passphrase: string) => request("/api/init", json({ passphrase })),
   unlock: (passphrase: string) => request("/api/unlock", json({ passphrase })),
   lock: () => request("/api/lock", { method: "POST" }),
 
@@ -60,6 +62,11 @@ export const api = {
 
   jobs: () => request<Job[]>("/api/jobs"),
   providers: () => request<ProviderInfo[]>("/api/providers"),
+  addProvider: (p: NewProvider) => request("/api/providers", json(p)),
+  removeProvider: (name: string, force = false) =>
+    request(`/api/providers/${encodeURIComponent(name)}?force=${force}`, {
+      method: "DELETE",
+    }),
   scrub: (opts: { deep?: boolean; repair?: boolean }) =>
     request<{ job_id: number }>("/api/scrub", json(opts)),
 };

@@ -21,10 +21,10 @@ from typing import Annotated, NoReturn, Optional
 
 import typer
 
-from scatterbox import oauth, pipeline, scrubber, vault
+from scatterbox import onboarding, pipeline, scrubber, vault
 from scatterbox.errors import ScatterboxError
 from scatterbox.placement import Policy
-from scatterbox.providers import create_provider, gdrive, onedrive, requires_secrets
+from scatterbox.providers import create_provider, requires_secrets
 from scatterbox.register import Register
 
 app = typer.Typer(
@@ -93,7 +93,9 @@ def _human(n: int) -> str:
 def init() -> None:
     """Create the register and vault in the scatterbox home directory."""
     home = _home()
-    if (home / "register.db").exists() or (home / "vault.json").exists():
+    # The vault is the initialization marker — a bare register.db may have
+    # been created by a daemon started before setup; that's fine to adopt.
+    if (home / "vault.json").exists():
         _fail(f"already initialized at {home}")
     passphrase = _passphrase(confirm=True)
     home.mkdir(parents=True, exist_ok=True)
@@ -260,22 +262,17 @@ def scrub(
         raise typer.Exit(code=1)
 
 
-# OAuth endpoint/scope knowledge lives in the adapter modules; the CLI only
-# needs to know which module backs which type.
-_OAUTH_TYPES = {"gdrive": gdrive, "onedrive": onedrive}
-
-
 def _onboard_oauth(
     register: Register,
     name: str,
     type_: str,
-    config: dict,
     client_id: str | None,
     open_browser: bool,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
 ) -> None:
-    """Interactive credential flow for gdrive/onedrive: browser consent →
-    tokens into the vault → connection test → row into the register."""
-    mod = _OAUTH_TYPES[type_]
+    """CLI front-end for OAuth onboarding: prompts here, shared flow in
+    scatterbox.onboarding (same code path as the web setup wizard)."""
     v = _unlock()
     if client_id is None:
         typer.echo(
@@ -290,28 +287,17 @@ def _onboard_oauth(
         # public clients have none.
         client_secret = typer.prompt("OAuth client secret", hide_input=True)
 
-    blob = oauth.run_loopback_flow(
-        auth_url=mod.AUTH_URL,
-        token_url=mod.TOKEN_URL,
+    quota = onboarding.onboard_oauth_provider(
+        register,
+        v,
+        name,
+        type_,
         client_id=client_id,
-        scopes=mod.SCOPES,
         client_secret=client_secret,
-        extra_auth_params=getattr(mod, "EXTRA_AUTH_PARAMS", None),
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
         open_browser=open_browser,
     )
-    secret_name = f"provider:{name}"
-    v.set_secret(secret_name, blob)
-    config["secret"] = secret_name
-    try:
-        instance = create_provider(type_, config, v)
-        quota = asyncio.run(instance.quota())  # connection test
-        if type_ == "gdrive":
-            asyncio.run(instance.prepare())  # create the scatterbox/ folder now
-            config.update(instance.learned_config())
-        register.add_provider(name, type_, config)
-    except ScatterboxError:
-        v.delete_secret(secret_name)  # don't strand tokens for a failed add
-        raise
     free = "" if quota.total_bytes is None else (
         f", {_human(quota.total_bytes - quota.used_bytes)} free"
     )
@@ -331,27 +317,29 @@ def provider_add(
     """Register a provider instance, running its credential flow if needed."""
     register = _open_register()
     try:
-        # Fail on a duplicate name before any OAuth dance.
-        try:
-            register.get_provider_by_name(name)
-        except ScatterboxError:
-            pass
-        else:
-            _fail(f"provider {name!r} already exists")
-        config: dict = {}
-        if max_object_bytes is not None:
-            config["max_object_bytes"] = max_object_bytes
-        if capacity_bytes is not None:
-            config["capacity_bytes"] = capacity_bytes
         if type_ == "localfs":
             if root is None:
                 _fail("--root is required for localfs providers")
-            config["root"] = str(root.resolve())
-            create_provider(type_, config)  # validates config, creates the root dir
-            register.add_provider(name, type_, config)
+            onboarding.add_localfs_provider(
+                register,
+                name,
+                root=root,
+                max_object_bytes=max_object_bytes,
+                capacity_bytes=capacity_bytes,
+            )
             typer.echo(f"added provider {name} (localfs at {root})")
-        elif type_ in _OAUTH_TYPES:
-            _onboard_oauth(register, name, type_, config, client_id, not no_browser)
+        elif type_ in onboarding.OAUTH_MODULES:
+            # Fail on a duplicate name before any OAuth dance.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_oauth(
+                register, name, type_, client_id, not no_browser,
+                max_object_bytes, capacity_bytes,
+            )
         else:
             _fail(f"unsupported provider type {type_!r} (localfs, gdrive, onedrive)")
     except ScatterboxError as exc:
@@ -369,17 +357,10 @@ def provider_remove(
     register = _open_register()
     try:
         row = register.get_provider_by_name(name)
-        count = register.replica_count_on_provider(row["id"])
-        if count and not force:
-            _fail(
-                f"provider {name!r} still holds {count} replica(s); "
-                "re-replicate first or pass --force (then run "
-                "'scatterbox scrub --repair' to heal the affected files)"
-            )
-        secret_name = json.loads(row["config"]).get("secret")
-        if secret_name is not None:
-            _unlock().delete_secret(secret_name)
-        register.delete_provider(row["id"])
+        needs_vault = json.loads(row["config"]).get("secret") is not None
+        count = onboarding.remove_provider(
+            register, name, vault=_unlock() if needs_vault else None, force=force
+        )
     except ScatterboxError as exc:
         _fail(str(exc))
     finally:
@@ -449,9 +430,9 @@ def daemon(
 
     from scatterbox_daemon import create_app
 
-    if not (_home() / "register.db").is_file():
-        _fail(f"not initialized at {_home()}; run 'scatterbox init' first")
     typer.echo(f"scatterbox daemon on http://{host}:{port} (home: {_home()})")
+    if not (_home() / "vault.json").is_file():
+        typer.echo("not set up yet — open the URL above to run the setup wizard")
     uvicorn.run(create_app(_home()), host=host, port=port, log_level="warning")
 
 

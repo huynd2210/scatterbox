@@ -205,6 +205,99 @@ def test_providers_endpoint_reports_quota_confidence(client):
         assert p["error"] is None
 
 
+def test_web_first_run_setup(tmp_path, monkeypatch):
+    """The whole CLI-free path: empty home -> /api/init -> providers via
+    API -> upload round-trip. (TASKS/PLAN: setup wizard, 2 setup paths.)"""
+    home = tmp_path / "fresh"
+    home.mkdir()
+    with TestClient(create_app(home)) as client:
+        status = client.get("/api/status").json()
+        assert status["initialized"] is False and status["locked"] is True
+
+        # empty passphrase rejected; then init unlocks immediately
+        assert client.post("/api/init", json={"passphrase": ""}).status_code == 400
+        assert client.post("/api/init", json={"passphrase": PASS}).status_code == 200
+        status = client.get("/api/status").json()
+        assert status["initialized"] is True and status["locked"] is False
+        # second init refused — it would orphan everything already encrypted
+        assert client.post("/api/init", json={"passphrase": "x"}).status_code == 409
+
+        for i in range(3):
+            resp = client.post(
+                "/api/providers",
+                json={"name": f"p{i}", "type": "localfs", "root": str(tmp_path / f"prov{i}")},
+            )
+            assert resp.status_code == 200, resp.text
+        # duplicate name and missing root are clean 400s
+        assert (
+            client.post(
+                "/api/providers",
+                json={"name": "p0", "type": "localfs", "root": str(tmp_path / "x")},
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post("/api/providers", json={"name": "q", "type": "localfs"}).status_code
+            == 400
+        )
+
+        data = b"wizard" * 4000
+        resp = client.post(
+            "/api/upload", files={"file": ("w.bin", data)}, data={"path": "/"}
+        )
+        assert wait_job(client, resp.json()["job_id"])["state"] == "done"
+        assert client.get("/api/download", params={"path": "/w.bin"}).content == data
+
+        # remove: guarded while replicas live there, force drops + reports
+        assert client.delete("/api/providers/p0").status_code == 409
+        resp = client.delete("/api/providers/p0", params={"force": True})
+        assert resp.status_code == 200
+        assert resp.json()["replicas_dropped"] >= 1
+        assert len(client.get("/api/providers").json()) == 2
+
+    # the CLI sees the web-initialized home as a normal one (two paths, one
+    # result): its init refuses, its commands work against the same vault
+    monkeypatch.setenv("SCATTERBOX_HOME", str(home))
+    monkeypatch.setenv("SCATTERBOX_PASSPHRASE", PASS)
+    from typer.testing import CliRunner
+
+    from scatterbox_cli.main import app as cli_app
+
+    runner = CliRunner()
+    assert runner.invoke(cli_app, ["init"]).exit_code == 1
+    listing = runner.invoke(cli_app, ["ls", "/"])
+    assert listing.exit_code == 0 and "w.bin" in listing.output
+
+
+def test_oauth_provider_add_via_api(client, monkeypatch):
+    """The endpoint threads the shared onboarding flow; OAuth itself is
+    covered by test_oauth/test_provider_onboarding."""
+    from scatterbox import onboarding
+
+    calls = {}
+
+    def fake_onboard(register, v, name, type_, **kwargs):
+        calls.update({"name": name, "type": type_, **kwargs})
+        register.add_provider(name, type_, {"secret": f"provider:{name}"})
+
+    monkeypatch.setattr(onboarding, "onboard_oauth_provider", fake_onboard)
+    # locked: refused before any browser opens
+    resp = client.post(
+        "/api/providers", json={"name": "gd", "type": "gdrive", "client_id": "cid"}
+    )
+    assert resp.status_code == 423 and calls == {}
+
+    unlock(client)
+    resp = client.post(
+        "/api/providers",
+        json={"name": "gd", "type": "gdrive", "client_id": "cid", "client_secret": "shh"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert calls["name"] == "gd" and calls["client_id"] == "cid"
+    assert calls["client_secret"] == "shh"
+    assert any(p["name"] == "gd" for p in client.get("/api/providers").json())
+
+
 def test_status_counts(client):
     unlock(client)
     resp = client.post(

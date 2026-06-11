@@ -176,6 +176,7 @@ The system's state is split into two portable artifacts, kept deliberately separ
 - **Transfers panel:** background job queue with progress (WebSocket), pause/retry.
 - **Advanced settings** per upload/folder: replica count, tier constraints, provider pin/exclude. Defaults hide all of this.
 - **Settings page:** provider setup wizard (add/edit/remove, per-instance limits), and Export/Import — one button exports register (+optional encryption) and vault for hopping machines (§9).
+- **First-run setup in the browser** (added post-Phase 3): the daemon starts on an uninitialized home; the web UI runs a setup wizard (create passphrase/vault → add providers, including the OAuth consent flow) so the CLI is one of two equal setup paths, not a prerequisite. Shared logic lives in `core/scatterbox/onboarding.py` — CLI and daemon call the same functions.
 
 ## 12. Roadmap
 

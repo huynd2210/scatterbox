@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from scatterbox import pipeline, vault
+from scatterbox import onboarding, pipeline, vault
 from scatterbox.errors import ScatterboxError, VPathNotFoundError, WrongPassphraseError
 from scatterbox.providers import create_provider
 from scatterbox.register import Register, derive_health
@@ -72,7 +72,23 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # -- session ---------------------------------------------------------------
+    # -- session / first-run setup ----------------------------------------------
+
+    @app.post("/api/init")
+    async def init(request: Request, body: dict):
+        """First-run setup from the web wizard: create the vault and unlock
+        it. The register already exists (opened at startup); the vault file
+        is the initialization marker, same rule as the CLI."""
+        state = _state(request)
+        if (state.home / "vault.json").is_file():
+            raise HTTPException(status_code=409, detail="already initialized")
+        passphrase = body.get("passphrase", "")
+        if len(passphrase) < 1:
+            raise HTTPException(status_code=400, detail="passphrase must not be empty")
+        state.vault = await asyncio.to_thread(
+            vault.create_vault, state.home / "vault.json", passphrase
+        )
+        return {"initialized": True, "locked": False}
 
     @app.post("/api/unlock")
     async def unlock(request: Request, body: dict):
@@ -100,6 +116,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         ok, total = state.register.durability_summary()
         jobs = state.register.list_jobs(limit=500)
         return {
+            "initialized": (state.home / "vault.json").is_file(),
             "locked": state.vault is None,
             "files": state.register.count_files(),
             "providers": len(state.register.list_providers()),
@@ -313,6 +330,78 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 entry["error"] = f"unreachable: {exc}"
             out.append(entry)
         return out
+
+    @app.post("/api/providers")
+    async def add_provider(request: Request, body: dict):
+        """Provider onboarding from the web wizard — same shared flow the
+        CLI uses. For gdrive/onedrive this opens a consent tab in the
+        user's browser (the daemon runs on their machine) and blocks this
+        request until the flow completes or times out."""
+        state = _state(request)
+        name = (body.get("name") or "").strip()
+        type_ = body.get("type", "localfs")
+        if not name:
+            raise HTTPException(status_code=400, detail="provider name required")
+        limits = {
+            "max_object_bytes": body.get("max_object_bytes") or None,
+            "capacity_bytes": body.get("capacity_bytes") or None,
+        }
+        try:
+            if type_ == "localfs":
+                root = (body.get("root") or "").strip()
+                if not root:
+                    raise HTTPException(status_code=400, detail="root directory required")
+                onboarding.add_localfs_provider(state.register, name, root=root, **limits)
+            elif type_ in onboarding.OAUTH_MODULES:
+                _require_unlocked(state)
+                client_id = (body.get("client_id") or "").strip()
+                if not client_id:
+                    raise HTTPException(status_code=400, detail="OAuth client id required")
+
+                def run_onboarding() -> None:
+                    # Own register connection: this runs on a worker thread,
+                    # and sqlite connections must not cross threads. WAL
+                    # makes the second connection to the same file safe.
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_oauth_provider(
+                            reg,
+                            state.vault,
+                            name,
+                            type_,
+                            client_id=client_id,
+                            client_secret=(body.get("client_secret") or "").strip() or None,
+                            **limits,
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_onboarding)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unsupported provider type {type_!r} (localfs, gdrive, onedrive)",
+                )
+        except ScatterboxError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        await state.ws.broadcast({"type": "files-changed"})
+        return {"name": name, "type": type_}
+
+    @app.delete("/api/providers/{name}")
+    async def remove_provider(request: Request, name: str, force: bool = False):
+        state = _state(request)
+        try:
+            row = state.register.get_provider_by_name(name)
+            if json.loads(row["config"]).get("secret") is not None:
+                _require_unlocked(state)
+            dropped = onboarding.remove_provider(
+                state.register, name, vault=state.vault, force=force
+            )
+        except ScatterboxError as exc:
+            # replica-guard refusals and unknown names both land here
+            raise HTTPException(status_code=409, detail=str(exc))
+        await state.ws.broadcast({"type": "files-changed"})
+        return {"removed": name, "replicas_dropped": dropped}
 
     @app.post("/api/scrub")
     async def scrub(request: Request, body: dict | None = None):

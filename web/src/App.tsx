@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { FileBrowser } from "./components/FileBrowser";
 import { Providers } from "./components/Providers";
+import { SetupWizard } from "./components/Setup";
 import { Transfers } from "./components/Transfers";
 import type { DaemonEvent, Status } from "./types";
 import { useDaemonEvents } from "./ws";
@@ -40,6 +41,9 @@ export default function App() {
         <button onClick={refreshStatus}>retry</button>
       </div>
     );
+  }
+  if (!status.initialized) {
+    return <SetupWizard onDone={refreshStatus} />;
   }
   if (status.locked) {
     return <UnlockScreen onUnlocked={refreshStatus} />;

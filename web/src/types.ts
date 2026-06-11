@@ -48,6 +48,7 @@ export interface ProviderInfo {
 }
 
 export interface Status {
+  initialized: boolean;
   locked: boolean;
   files: number;
   providers: number;
@@ -72,6 +73,16 @@ export interface FileDetail {
   health: string;
   min_live: number;
   providers: ProviderBreakdown[];
+}
+
+export interface NewProvider {
+  name: string;
+  type: "localfs" | "gdrive" | "onedrive";
+  root?: string;
+  client_id?: string;
+  client_secret?: string;
+  max_object_bytes?: number | null;
+  capacity_bytes?: number | null;
 }
 
 // One message on /ws. type "job" carries lifecycle + optional progress;
