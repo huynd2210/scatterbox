@@ -40,6 +40,7 @@ from scatterbox.errors import (
 from scatterbox.placement import Policy
 from scatterbox.providers import Provider, RemoteRef, create_provider
 from scatterbox.register import Register, derive_health
+from scatterbox.vault import SecretStore
 
 DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB plaintext per chunk
 CHUNK_OVERHEAD = keys.NONCE_LEN + 16  # nonce + GCM tag added per stored object
@@ -84,11 +85,16 @@ class PutResult:
     replicas: int
 
 
-def load_providers(register: Register) -> list[ProviderHandle]:
-    """Rehydrate every registered provider row into a live adapter handle."""
+def load_providers(
+    register: Register, secrets: SecretStore | None = None
+) -> list[ProviderHandle]:
+    """Rehydrate every registered provider row into a live adapter handle.
+
+    `secrets` is the unlocked vault; required only when a registered
+    provider type keeps credentials there (gdrive/onedrive)."""
     handles = []
     for row in register.list_providers():
-        instance = create_provider(row["type"], json.loads(row["config"]))
+        instance = create_provider(row["type"], json.loads(row["config"]), secrets)
         score = json.loads(row["profile"] or "{}").get("reliability_score")
         handles.append(
             ProviderHandle(
@@ -146,6 +152,7 @@ async def put_file(
     replicas: int | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     force_large: bool = False,
+    secrets: SecretStore | None = None,
 ) -> PutResult:
     """Store a local file at a virtual path. The write path, start to finish.
 
@@ -177,7 +184,7 @@ async def put_file(
     # Pick the providers once for the whole file; every chunk goes to the
     # same set (per-chunk placement comes later, with repair).
     targets = await placement.select_targets(
-        load_providers(register), policy, chunk_size + CHUNK_OVERHEAD
+        load_providers(register, secrets), policy, chunk_size + CHUNK_OVERHEAD
     )
     eff_chunk_size = _effective_chunk_size(targets, chunk_size)
 
@@ -253,6 +260,8 @@ async def get_file(
     master_key: bytes,
     vpath: str,
     local_path: Path | str,
+    *,
+    secrets: SecretStore | None = None,
 ) -> None:
     """Restore a file: the read path.
 
@@ -288,7 +297,7 @@ async def get_file(
                     if pid not in instances:
                         prow = register.get_provider(pid)
                         instances[pid] = create_provider(
-                            prow["type"], json.loads(prow["config"])
+                            prow["type"], json.loads(prow["config"]), secrets
                         )
                     prior = instances[pid].profile().reliability_prior
                     # Four checks below, same pattern each time: on failure,
@@ -343,7 +352,9 @@ async def get_file(
         tmp.unlink(missing_ok=True)
 
 
-async def remove_file(register: Register, vpath: str) -> None:
+async def remove_file(
+    register: Register, vpath: str, *, secrets: SecretStore | None = None
+) -> None:
     """Best-effort delete of all replicas, then drop the file from the register."""
     vpath = normalize_vpath(vpath)
     rec = register.get_file_with_manifest(vpath)
@@ -354,7 +365,9 @@ async def remove_file(register: Register, vpath: str) -> None:
         pid = replica["provider_id"]
         if pid not in instances:
             prow = register.get_provider(pid)
-            instances[pid] = create_provider(prow["type"], json.loads(prow["config"]))
+            instances[pid] = create_provider(
+                prow["type"], json.loads(prow["config"]), secrets
+            )
         try:
             await instances[pid].delete(RemoteRef(replica["remote_ref"]))
         except Exception:

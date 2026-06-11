@@ -32,6 +32,7 @@ from scatterbox.pipeline import ProviderHandle, load_providers
 from scatterbox.placement import Policy
 from scatterbox.providers import RemoteRef
 from scatterbox.register import Register
+from scatterbox.vault import SecretStore
 
 
 @dataclass
@@ -106,11 +107,14 @@ async def scrub(
     probe_limit: int | None = None,
     deep_budget_bytes: int | None = None,
     repair: bool = False,
+    secrets: SecretStore | None = None,
 ) -> ScrubReport:
     """One scrub cycle. deep=False: cheap probes only. deep=True: download +
     verify until deep_budget_bytes is spent (None = no budget), cheap probes
-    for the rest. repair=True: re-replicate below-floor chunks afterwards."""
-    handles = {h.id: h for h in load_providers(register)}
+    for the rest. repair=True: re-replicate below-floor chunks afterwards.
+    `secrets` (the unlocked vault) is needed only when a registered provider
+    keeps credentials there — scrubbing itself never needs the master key."""
+    handles = {h.id: h for h in load_providers(register, secrets)}
     report = ScrubReport()
     spent = 0  # download bytes used so far against deep_budget_bytes
     # replicas_for_scrub yields oldest-verified first, so each cycle attends
@@ -129,12 +133,15 @@ async def scrub(
             # fall back to the cheap existence probe
             await _probe(register, handle, replica, report)
     if repair:
-        await repair_chunks(register, report)
+        await repair_chunks(register, report, secrets=secrets)
     return report
 
 
 async def repair_chunks(
-    register: Register, report: ScrubReport | None = None
+    register: Register,
+    report: ScrubReport | None = None,
+    *,
+    secrets: SecretStore | None = None,
 ) -> ScrubReport:
     """Bring every chunk back to its replica floor (TASKS.md §5).
 
@@ -144,7 +151,7 @@ async def repair_chunks(
     it unattended.
     """
     report = report if report is not None else ScrubReport()
-    handles = load_providers(register)
+    handles = load_providers(register, secrets)
     by_id = {h.id: h for h in handles}
 
     for chunk in register.chunks_below_floor():

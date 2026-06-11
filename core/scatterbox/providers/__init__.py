@@ -2,8 +2,12 @@
 
 This package exposes the Provider interface plus the adapters that exist so
 far. The register stores each provider instance as (type, JSON config);
-create_provider turns such a row back into a live adapter object. Phase 2
-adds real types here ("gdrive", "onedrive", ...).
+create_provider turns such a row back into a live adapter object.
+
+Real providers (gdrive, onedrive) keep their credentials in the vault, not
+in the register config — so instantiating one needs an unlocked SecretStore.
+requires_secrets() lets callers (the CLI) know whether the vault must be
+unlocked before touching a given provider type.
 """
 
 from __future__ import annotations
@@ -17,7 +21,10 @@ from scatterbox.providers.base import (
     Transform,
 )
 from scatterbox.providers.chaos import ChaosProvider
+from scatterbox.providers.gdrive import GDriveProvider
 from scatterbox.providers.localfs import LocalFSProvider
+from scatterbox.providers.onedrive import OneDriveProvider
+from scatterbox.vault import SecretStore
 
 __all__ = [
     "Provider",
@@ -27,12 +34,26 @@ __all__ = [
     "Transform",
     "LocalFSProvider",
     "ChaosProvider",
+    "GDriveProvider",
+    "OneDriveProvider",
     "create_provider",
+    "requires_secrets",
+    "SECRET_TYPES",
 ]
 
+# Provider types whose credentials live in the vault.
+SECRET_TYPES = frozenset({"gdrive", "onedrive"})
 
-def create_provider(type_: str, config: dict) -> Provider:
-    """Instantiate a provider adapter from its register row (type + JSON config)."""
+
+def requires_secrets(type_: str) -> bool:
+    return type_ in SECRET_TYPES
+
+
+def create_provider(
+    type_: str, config: dict, secrets: SecretStore | None = None
+) -> Provider:
+    """Instantiate a provider adapter from its register row (type + JSON
+    config). Secret-requiring types additionally need the unlocked vault."""
     if type_ == "localfs":
         return LocalFSProvider(
             root=config["root"],
@@ -57,5 +78,25 @@ def create_provider(type_: str, config: dict) -> Provider:
             killed=config.get("killed", False),
             reliability_prior=config.get("reliability_prior"),
             latency_class=config.get("latency_class"),
+        )
+    if type_ in SECRET_TYPES:
+        if secrets is None:
+            raise ScatterboxError(
+                f"provider type {type_!r} stores credentials in the vault — "
+                "unlock it first (passphrase required)"
+            )
+        if type_ == "gdrive":
+            return GDriveProvider(
+                secrets=secrets,
+                secret_name=config["secret"],
+                folder_id=config.get("folder_id"),
+                max_object_bytes=config.get("max_object_bytes"),
+                capacity_bytes=config.get("capacity_bytes"),
+            )
+        return OneDriveProvider(
+            secrets=secrets,
+            secret_name=config["secret"],
+            max_object_bytes=config.get("max_object_bytes"),
+            capacity_bytes=config.get("capacity_bytes"),
         )
     raise ScatterboxError(f"unknown provider type: {type_!r}")

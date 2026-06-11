@@ -21,10 +21,10 @@ from typing import Annotated, NoReturn, Optional
 
 import typer
 
-from scatterbox import pipeline, scrubber, vault
+from scatterbox import oauth, pipeline, scrubber, vault
 from scatterbox.errors import ScatterboxError
 from scatterbox.placement import Policy
-from scatterbox.providers import create_provider
+from scatterbox.providers import create_provider, gdrive, onedrive, requires_secrets
 from scatterbox.register import Register
 
 app = typer.Typer(
@@ -61,13 +61,22 @@ def _passphrase(confirm: bool = False) -> str:
     return typer.prompt("Passphrase", hide_input=True, confirmation_prompt=confirm)
 
 
-def _master_key() -> bytes:
-    """Prompt for the passphrase and unlock the vault (commands that need to
-    encrypt or decrypt call this; ls/status/rm don't need the key at all)."""
+def _unlock() -> vault.Vault:
+    """Prompt for the passphrase and unlock the vault. Needed by commands
+    that encrypt/decrypt (master key) or touch a provider whose credentials
+    live in the vault (gdrive/onedrive tokens)."""
     try:
-        return vault.unlock_vault(_home() / "vault.json", _passphrase()).master_key
+        return vault.unlock_vault(_home() / "vault.json", _passphrase())
     except ScatterboxError as exc:
         _fail(str(exc))
+
+
+def _vault_if_needed(register: Register) -> vault.Vault | None:
+    """Unlock the vault only when some registered provider keeps credentials
+    there — pure-localfs setups never get a passphrase prompt for rm/scrub."""
+    if any(requires_secrets(row["type"]) for row in register.list_providers()):
+        return _unlock()
+    return None
 
 
 def _human(n: int) -> str:
@@ -106,7 +115,7 @@ def put(
 ) -> None:
     """Store a local file at a virtual path."""
     register = _open_register()
-    master_key = _master_key()
+    v = _unlock()
     policy = Policy(
         replicas=replicas,
         pinned=frozenset(pin or ()),
@@ -116,11 +125,12 @@ def put(
         result = asyncio.run(
             pipeline.put_file(
                 register,
-                master_key,
+                v.master_key,
                 local,
                 vpath,
                 policy=policy,
                 force_large=force_large,
+                secrets=v,
             )
         )
     except ScatterboxError as exc:
@@ -140,9 +150,9 @@ def get(
 ) -> None:
     """Restore a virtual path to a local file."""
     register = _open_register()
-    master_key = _master_key()
+    v = _unlock()
     try:
-        asyncio.run(pipeline.get_file(register, master_key, vpath, local))
+        asyncio.run(pipeline.get_file(register, v.master_key, vpath, local, secrets=v))
     except ScatterboxError as exc:
         _fail(str(exc))
     finally:
@@ -193,7 +203,7 @@ def rm(vpath: Annotated[str, typer.Argument()]) -> None:
     """Delete a virtual path and its replicas."""
     register = _open_register()
     try:
-        asyncio.run(pipeline.remove_file(register, vpath))
+        asyncio.run(pipeline.remove_file(register, vpath, secrets=_vault_if_needed(register)))
     except ScatterboxError as exc:
         _fail(str(exc))
     finally:
@@ -219,6 +229,7 @@ def scrub(
                 probe_limit=probe_limit,
                 deep_budget_bytes=deep_budget_bytes,
                 repair=repair,
+                secrets=_vault_if_needed(register),
             )
         )
     except ScatterboxError as exc:
@@ -237,33 +248,167 @@ def scrub(
         raise typer.Exit(code=1)
 
 
+# OAuth endpoint/scope knowledge lives in the adapter modules; the CLI only
+# needs to know which module backs which type.
+_OAUTH_TYPES = {"gdrive": gdrive, "onedrive": onedrive}
+
+
+def _onboard_oauth(
+    register: Register,
+    name: str,
+    type_: str,
+    config: dict,
+    client_id: str | None,
+    open_browser: bool,
+) -> None:
+    """Interactive credential flow for gdrive/onedrive: browser consent →
+    tokens into the vault → connection test → row into the register."""
+    mod = _OAUTH_TYPES[type_]
+    v = _unlock()
+    if client_id is None:
+        typer.echo(
+            f"You need your own OAuth client app for {type_} "
+            "(Google Cloud Console / Microsoft Entra portal)."
+        )
+        client_id = typer.prompt("OAuth client id")
+    client_secret = None
+    if type_ == "gdrive":
+        # Google installed apps are issued a client secret (not actually
+        # confidential, but required at the token endpoint). Microsoft
+        # public clients have none.
+        client_secret = typer.prompt("OAuth client secret", hide_input=True)
+
+    blob = oauth.run_loopback_flow(
+        auth_url=mod.AUTH_URL,
+        token_url=mod.TOKEN_URL,
+        client_id=client_id,
+        scopes=mod.SCOPES,
+        client_secret=client_secret,
+        extra_auth_params=getattr(mod, "EXTRA_AUTH_PARAMS", None),
+        open_browser=open_browser,
+    )
+    secret_name = f"provider:{name}"
+    v.set_secret(secret_name, blob)
+    config["secret"] = secret_name
+    try:
+        instance = create_provider(type_, config, v)
+        quota = asyncio.run(instance.quota())  # connection test
+        if type_ == "gdrive":
+            asyncio.run(instance.prepare())  # create the scatterbox/ folder now
+            config.update(instance.learned_config())
+        register.add_provider(name, type_, config)
+    except ScatterboxError:
+        v.delete_secret(secret_name)  # don't strand tokens for a failed add
+        raise
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} ({type_}{free})")
+
+
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
-    capacity_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
+    capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
+    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (gdrive/onedrive); prompted if omitted.")] = None,
+    no_browser: Annotated[bool, typer.Option("--no-browser", help="Print the consent URL instead of opening a browser.")] = False,
 ) -> None:
-    """Register a provider instance (Phase 0: localfs only)."""
-    if type_ != "localfs":
-        _fail(f"unsupported provider type {type_!r} (Phase 0 supports: localfs)")
-    if root is None:
-        _fail("--root is required for localfs providers")
+    """Register a provider instance, running its credential flow if needed."""
     register = _open_register()
     try:
-        config = {"root": str(root.resolve())}
+        # Fail on a duplicate name before any OAuth dance.
+        try:
+            register.get_provider_by_name(name)
+        except ScatterboxError:
+            pass
+        else:
+            _fail(f"provider {name!r} already exists")
+        config: dict = {}
         if max_object_bytes is not None:
             config["max_object_bytes"] = max_object_bytes
         if capacity_bytes is not None:
             config["capacity_bytes"] = capacity_bytes
-        create_provider(type_, config)  # validates config and creates the root dir
-        register.add_provider(name, type_, config)
+        if type_ == "localfs":
+            if root is None:
+                _fail("--root is required for localfs providers")
+            config["root"] = str(root.resolve())
+            create_provider(type_, config)  # validates config, creates the root dir
+            register.add_provider(name, type_, config)
+            typer.echo(f"added provider {name} (localfs at {root})")
+        elif type_ in _OAUTH_TYPES:
+            _onboard_oauth(register, name, type_, config, client_id, not no_browser)
+        else:
+            _fail(f"unsupported provider type {type_!r} (localfs, gdrive, onedrive)")
     except ScatterboxError as exc:
         _fail(str(exc))
     finally:
         register.close()
-    typer.echo(f"added provider {name} ({type_} at {root})")
+
+
+@provider_app.command("remove")
+def provider_remove(
+    name: Annotated[str, typer.Argument()],
+    force: Annotated[bool, typer.Option("--force", help="Remove even if replicas still live there.")] = False,
+) -> None:
+    """Remove a provider (and its vault credentials)."""
+    register = _open_register()
+    try:
+        row = register.get_provider_by_name(name)
+        count = register.replica_count_on_provider(row["id"])
+        if count and not force:
+            _fail(
+                f"provider {name!r} still holds {count} replica(s); "
+                "re-replicate first or pass --force (then run "
+                "'scatterbox scrub --repair' to heal the affected files)"
+            )
+        secret_name = json.loads(row["config"]).get("secret")
+        if secret_name is not None:
+            _unlock().delete_secret(secret_name)
+        register.delete_provider(row["id"])
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    typer.echo(f"removed provider {name}")
+    if count:
+        typer.secho(
+            f"warning: {count} replica(s) were dropped with it — run "
+            "'scatterbox scrub --repair'",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
+@provider_app.command("set")
+def provider_set(
+    name: Annotated[str, typer.Argument()],
+    max_object_bytes: Annotated[Optional[int], typer.Option(min=0, help="Per-object size cap; 0 clears it.")] = None,
+    capacity_bytes: Annotated[Optional[int], typer.Option(min=0, help="Account usage cap; 0 clears it.")] = None,
+) -> None:
+    """Change a provider instance's configurable limits (PLAN.md §6)."""
+    if max_object_bytes is None and capacity_bytes is None:
+        _fail("nothing to change: pass --max-object-bytes and/or --capacity-bytes")
+    register = _open_register()
+    try:
+        row = register.get_provider_by_name(name)
+        config = json.loads(row["config"])
+        for key, value in (
+            ("max_object_bytes", max_object_bytes),
+            ("capacity_bytes", capacity_bytes),
+        ):
+            if value == 0:
+                config.pop(key, None)
+            elif value is not None:
+                config[key] = value
+        register.update_provider_config(row["id"], config)
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    typer.echo(f"updated provider {name}")
 
 
 @provider_app.command("list")
@@ -275,9 +420,10 @@ def provider_list() -> None:
         if not rows:
             typer.echo("no providers; add one with 'scatterbox provider add'")
             return
+        secrets = _vault_if_needed(register)
         for row in rows:
             config = json.loads(row["config"])
-            quota = asyncio.run(create_provider(row["type"], config).quota())
+            quota = asyncio.run(create_provider(row["type"], config, secrets).quota())
             if quota.total_bytes is None:
                 space = f"{_human(quota.used_bytes)} used, total unknown"
             else:

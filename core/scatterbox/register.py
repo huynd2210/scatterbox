@@ -170,6 +170,36 @@ class Register:
             raise ScatterboxError(f"no provider with id {provider_id}")
         return row
 
+    def get_provider_by_name(self, name: str) -> sqlite3.Row:
+        row = self.conn.execute(
+            "SELECT * FROM providers WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            raise ScatterboxError(f"no provider named {name!r}")
+        return row
+
+    def replica_count_on_provider(self, provider_id: int) -> int:
+        """How many non-lost replicas live on this provider (for the safety
+        check before `provider remove`)."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM replicas WHERE provider_id = ? AND state != 'lost'",
+            (provider_id,),
+        ).fetchone()[0]
+
+    def delete_provider(self, provider_id: int) -> None:
+        """Drop a provider and any replica rows pointing at it.
+
+        The replica rows must go too (the FK would block the delete
+        otherwise) — afterwards chunks_below_floor() reports the orphaned
+        chunks, so `scrub --repair` re-replicates them elsewhere. Callers
+        are responsible for warning the user first.
+        """
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM replicas WHERE provider_id = ?", (provider_id,)
+            )
+            self.conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+
     def update_provider_config(self, provider_id: int, config: dict) -> None:
         with self.conn:  # "with conn" = run inside a transaction, commit on exit
             self.conn.execute(
