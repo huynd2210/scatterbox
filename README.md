@@ -56,7 +56,9 @@ does not make free tiers a place for irreplaceable data.
   it is.
 
 The full architecture (and the reasoning behind it) is in [PLAN.md](PLAN.md);
-current work is tracked in [TASKS.md](TASKS.md).
+the complete feature reference (every command, endpoint, policy field, and
+durability rule) is [docs/FEATURES.md](docs/FEATURES.md); current work is
+tracked in [TASKS.md](TASKS.md).
 
 ## Status
 

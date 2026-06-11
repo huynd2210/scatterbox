@@ -41,6 +41,8 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
   );
 }
 
+/** Wizard import path: backup zip / vault+register / vault-only (which
+ * recovers the register from provider snapshots) + passphrase. */
 function ImportStep({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
   const [files, setFiles] = useState<File[]>([]);
   const [passphrase, setPassphrase] = useState("");
@@ -100,6 +102,8 @@ function ImportStep({ onDone, onBack }: { onDone: () => void; onBack: () => void
   );
 }
 
+/** Wizard step 1: choose + confirm the master passphrase (creates and
+ * unlocks the vault; warns there is no recovery). */
 function PassphraseStep({ onNext }: { onNext: () => void }) {
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -150,6 +154,8 @@ function PassphraseStep({ onNext }: { onNext: () => void }) {
   );
 }
 
+/** Wizard step 2: add storage providers (nudges toward the 3 the default
+ * replica floor wants, but allows finishing early). */
 function ProvidersStep({ onDone }: { onDone: () => void }) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
 

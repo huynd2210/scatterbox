@@ -36,6 +36,7 @@ def oauth_types() -> dict[str, object]:
 
 
 def _ensure_name_free(register: Register, name: str) -> None:
+    """Fail on a duplicate provider name BEFORE any credential flow runs."""
     try:
         register.get_provider_by_name(name)
     except ScatterboxError:
@@ -44,6 +45,7 @@ def _ensure_name_free(register: Register, name: str) -> None:
 
 
 def _limits(max_object_bytes: int | None, capacity_bytes: int | None) -> dict:
+    """The per-instance limit config keys, omitting unset ones."""
     config: dict = {}
     if max_object_bytes is not None:
         config["max_object_bytes"] = max_object_bytes

@@ -40,6 +40,7 @@ app.add_typer(policy_app, name="policy")
 
 
 def _home() -> Path:
+    """The scatterbox state directory ($SCATTERBOX_HOME or ~/.scatterbox)."""
     return Path(os.environ.get("SCATTERBOX_HOME", str(Path.home() / ".scatterbox")))
 
 
@@ -50,6 +51,7 @@ def _fail(message: str) -> NoReturn:
 
 
 def _open_register() -> Register:
+    """Open the register or fail with init guidance; caller closes it."""
     db = _home() / "register.db"
     if not db.is_file():
         _fail(f"not initialized at {_home()}; run 'scatterbox init' first")
@@ -57,6 +59,8 @@ def _open_register() -> Register:
 
 
 def _passphrase(confirm: bool = False) -> str:
+    """Passphrase from $SCATTERBOX_PASSPHRASE (scripts/tests) or a hidden
+    interactive prompt."""
     env = os.environ.get("SCATTERBOX_PASSPHRASE")
     if env:
         return env
@@ -425,6 +429,7 @@ def provider_set(
 
 
 def _policy_words(policy: Policy) -> str:
+    """One human-readable line summarizing a policy (for policy show/list)."""
     parts = []
     if policy.scheme == "ec":
         parts.append(f"ec({policy.ec_k},{policy.ec_n})")

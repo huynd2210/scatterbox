@@ -164,6 +164,10 @@ _VPATH_SENTINEL = chr(0x10FFFF)
 
 
 class Register:
+    """One open connection to the central register (see module docstring
+    for the schema). All storage metadata flows through methods here —
+    callers never run their own SQL against the crown jewel."""
+
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,6 +178,7 @@ class Register:
         self._migrate()
 
     def _migrate(self) -> None:
+        """Apply any migration scripts this database has not seen yet."""
         # user_version starts at 0; run every script we have beyond it.
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         for i, script in enumerate(_MIGRATIONS[version:], start=version + 1):
@@ -187,6 +192,7 @@ class Register:
     # -- providers ----------------------------------------------------------
 
     def add_provider(self, name: str, type_: str, config: dict) -> int:
+        """Insert a provider row (non-secret config only); returns its id."""
         try:
             cur = self.conn.execute(
                 "INSERT INTO providers (name, type, config, created_at) VALUES (?, ?, ?, ?)",
@@ -202,6 +208,7 @@ class Register:
         return self.conn.execute("SELECT * FROM providers ORDER BY id").fetchall()
 
     def get_provider(self, provider_id: int) -> sqlite3.Row:
+        """One provider row by id, or a loud error."""
         row = self.conn.execute(
             "SELECT * FROM providers WHERE id = ?", (provider_id,)
         ).fetchone()
@@ -210,6 +217,7 @@ class Register:
         return row
 
     def get_provider_by_name(self, name: str) -> sqlite3.Row:
+        """One provider row by user-chosen name, or a loud error."""
         row = self.conn.execute(
             "SELECT * FROM providers WHERE name = ?", (name,)
         ).fetchone()
@@ -240,6 +248,7 @@ class Register:
             self.conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
 
     def update_provider_config(self, provider_id: int, config: dict) -> None:
+        """Replace a provider's JSON config (limits, learned folder ids…)."""
         with self.conn:  # "with conn" = run inside a transaction, commit on exit
             self.conn.execute(
                 "UPDATE providers SET config = ? WHERE id = ?",
@@ -274,6 +283,7 @@ class Register:
     # -- folder policies (Phase 5, PLAN.md §7) --------------------------------
 
     def set_folder_policy(self, vpath: str, policy: dict) -> None:
+        """Attach/replace the placement policy stored for a folder."""
         with self.conn:
             self.conn.execute(
                 """INSERT INTO policies (vpath, policy) VALUES (?, ?)
@@ -282,11 +292,13 @@ class Register:
             )
 
     def delete_folder_policy(self, vpath: str) -> bool:
+        """Drop a folder's policy; returns False if none was set."""
         with self.conn:
             cur = self.conn.execute("DELETE FROM policies WHERE vpath = ?", (vpath,))
         return cur.rowcount > 0
 
     def list_folder_policies(self) -> list[tuple[str, dict]]:
+        """Every (folder, policy dict), sorted by path."""
         return [
             (row["vpath"], json.loads(row["policy"]))
             for row in self.conn.execute("SELECT * FROM policies ORDER BY vpath")
@@ -308,6 +320,7 @@ class Register:
     # -- files / manifests ---------------------------------------------------
 
     def get_file(self, vpath: str) -> sqlite3.Row | None:
+        """The file row at an exact vpath, or None."""
         return self.conn.execute(
             "SELECT * FROM files WHERE vpath = ?", (vpath,)
         ).fetchone()
@@ -328,6 +341,8 @@ class Register:
         ).fetchone()
 
     def list_all_files(self) -> list[sqlite3.Row]:
+        """Every file row (vpath, size) — small archives/tests only; the
+        browse path uses list_children's indexed range scans instead."""
         return self.conn.execute(
             "SELECT vpath, size FROM files ORDER BY vpath"
         ).fetchall()
@@ -371,6 +386,8 @@ class Register:
         return dirs, files
 
     def move_file(self, file_id: int, new_vpath: str) -> None:
+        """Rename one file row; the UNIQUE index turns collisions into a
+        clean already-exists error."""
         try:
             with self.conn:
                 self.conn.execute(
@@ -486,6 +503,7 @@ class Register:
         return cur.lastrowid
 
     def delete_file(self, file_id: int) -> None:
+        """Drop a file row (manifest/chunks/replicas cascade away with it)."""
         # The ON DELETE CASCADEs take the manifest, chunks and replicas with it.
         with self.conn:
             self.conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
@@ -493,6 +511,7 @@ class Register:
     # -- chunks / replicas ----------------------------------------------------
 
     def get_chunks(self, manifest_id: int) -> list[sqlite3.Row]:
+        """A manifest's chunks in seq order (the read path concatenates)."""
         # ORDER BY seq: the read path concatenates these in order.
         return self.conn.execute(
             "SELECT * FROM chunks WHERE manifest_id = ? ORDER BY seq", (manifest_id,)
@@ -707,6 +726,7 @@ class Register:
     # daemon's memory/WebSocket, not here.
 
     def add_job(self, kind: str, payload: dict) -> int:
+        """Enqueue a background job; returns its id."""
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO jobs (kind, payload, state, created_at) VALUES (?, ?, 'pending', ?)",
@@ -749,12 +769,14 @@ class Register:
             )
 
     def get_job(self, job_id: int) -> sqlite3.Row:
+        """One job row, or a loud error for an unknown id."""
         row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             raise ScatterboxError(f"no job with id {job_id}")
         return row
 
     def list_jobs(self, limit: int = 100) -> list[sqlite3.Row]:
+        """Most recent jobs first (the transfers panel's data source)."""
         return self.conn.execute(
             "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()

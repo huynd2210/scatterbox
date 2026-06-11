@@ -42,6 +42,7 @@ export function Transfers({ lastEvent }: { lastEvent: DaemonEvent | null }) {
   );
 }
 
+/** Human line for a job row ("upload /docs/a.bin", "scrub (deep)"…). */
 function describe(job: Job): string {
   const p = job.payload;
   switch (job.kind) {
@@ -56,6 +57,7 @@ function describe(job: Job): string {
   }
 }
 
+/** One job card: state, progress bar while running, scrub tallies, error. */
 function JobRow({ job, progress }: { job: Job; progress?: Progress }) {
   const pct =
     job.state === "done"

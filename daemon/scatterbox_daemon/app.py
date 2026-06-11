@@ -42,18 +42,25 @@ def _state(request: Request) -> DaemonState:
 
 
 def _require_unlocked(state: DaemonState) -> None:
+    """Gate for endpoints that need the master key or vault credentials."""
     if state.vault is None:
         # 423 Locked: the explorer shows the unlock screen on this status
         raise HTTPException(status_code=423, detail="daemon is locked")
 
 
 def create_app(home: Path | str | None = None) -> FastAPI:
+    """Build the daemon app for one scatterbox home (env/default if None).
+
+    Endpoints close over the per-app DaemonState; lifespan owns the
+    register connection and the worker/snapshotter background tasks."""
     home = Path(
         home or os.environ.get("SCATTERBOX_HOME", str(Path.home() / ".scatterbox"))
     )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Open the register, rescue jobs a crash left running, start the
+        background tasks; tear it all down on shutdown."""
         state = DaemonState(home=home, register=Register(home / "register.db"))
         rescued = state.register.reset_orphaned_jobs()
         if rescued:
@@ -199,6 +206,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.post("/api/unlock")
     async def unlock(request: Request, body: dict):
+        """Derive the master key from the passphrase and hold the vault in
+        memory; 401 on a wrong passphrase."""
         state = _state(request)
         passphrase = body.get("passphrase", "")
         try:
@@ -214,11 +223,14 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.post("/api/lock")
     async def lock(request: Request):
+        """Forget the master key (and provider credentials) immediately."""
         _state(request).vault = None
         return {"locked": True}
 
     @app.get("/api/status")
     async def status(request: Request):
+        """Setup/lock state plus the header counters: file/provider counts,
+        global durability (chunks at full target), pending jobs."""
         state = _state(request)
         ok, total = state.register.durability_summary()
         jobs = state.register.list_jobs(limit=500)
@@ -236,6 +248,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.get("/api/files")
     async def list_files(request: Request, path: str = "/"):
+        """Directory listing straight from the index — the browse hot path,
+        O(children) regardless of archive size."""
         state = _state(request)
         try:
             vpath = pipeline.normalize_vpath(path)
@@ -322,6 +336,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.get("/api/policies")
     async def policies(request: Request):
+        """Every folder policy (sparse dicts, as stored)."""
         return [
             {"path": folder, "policy": data}
             for folder, data in _state(request).register.list_folder_policies()
@@ -346,6 +361,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.put("/api/policy")
     async def policy_set(request: Request, body: dict):
+        """Attach/replace a folder's policy; validates EC params and spread
+        mode/cap combinations before anything is stored."""
         state = _state(request)
         try:
             vpath = pipeline.normalize_vpath(body.get("path", "/"))
@@ -373,6 +390,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.delete("/api/policy")
     async def policy_unset(request: Request, path: str):
+        """Drop a folder's policy — its subtree falls back to the parent's."""
         state = _state(request)
         if not state.register.delete_folder_policy(pipeline.normalize_vpath(path)):
             raise HTTPException(status_code=404, detail=f"no policy set on {path}")
@@ -381,6 +399,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.post("/api/move")
     async def move(request: Request, body: dict):
+        """Move/rename a file or subtree — pure register metadata, no
+        provider I/O, hence synchronous rather than a job."""
         state = _state(request)
         try:
             moved = pipeline.move_path(state.register, body["src"], body["dst"])
@@ -471,6 +491,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.get("/api/jobs")
     async def jobs(request: Request, limit: int = 100):
+        """Recent jobs, newest first — the transfers panel's seed data
+        (live updates ride the WebSocket)."""
         state = _state(request)
         return [
             {
@@ -489,6 +511,9 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.get("/api/providers")
     async def providers(request: Request):
+        """The provider dashboard payload: per provider, quota with its
+        confidence label, learned reliability, replica count — an
+        unreachable provider becomes an error entry, never a 500."""
         state = _state(request)
         out = []
         for row in state.register.list_providers():
@@ -581,6 +606,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.delete("/api/providers/{name}")
     async def remove_provider(request: Request, name: str, force: bool = False):
+        """Remove a provider (guarded by the live-replica check unless
+        force) and delete its vault credentials."""
         state = _state(request)
         try:
             row = state.register.get_provider_by_name(name)
@@ -598,6 +625,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.post("/api/scrub")
     async def scrub(request: Request, body: dict | None = None):
+        """Enqueue a scrub job (deep/repair per body flags)."""
         state = _state(request)
         body = body or {}
         job_id = state.register.add_job(
@@ -611,6 +639,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket):
+        """Event feed: job lifecycle/progress, files-changed, snapshots.
+        Inbound messages are ignored (keepalive only)."""
         state: DaemonState = websocket.app.state.sb
         await state.ws.connect(websocket)
         try:

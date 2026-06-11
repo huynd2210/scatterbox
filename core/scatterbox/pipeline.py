@@ -78,6 +78,8 @@ class ProviderHandle:
 
 @dataclass(frozen=True)
 class PutResult:
+    """What put_file reports back: where the file landed and in what shape."""
+
     file_id: int
     vpath: str
     size: int
@@ -543,6 +545,8 @@ async def remove_file(
 
 @dataclass(frozen=True)
 class FileStatus:
+    """A file's durability picture for status displays (CLI + daemon)."""
+
     vpath: str
     size: int
     health: str  # healthy | degraded | at-risk | lost

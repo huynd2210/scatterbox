@@ -31,6 +31,9 @@ from scatterbox.providers.localfs import LocalFSProvider
 
 
 class ChaosProvider:
+    """LocalFSProvider wrapped in configurable disasters (module docstring
+    has the failure-mode catalog)."""
+
     transform: Transform | None = None
 
     def __init__(

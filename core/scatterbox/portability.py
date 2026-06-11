@@ -62,6 +62,8 @@ def register_bytes(register: Register) -> bytes:
 
 
 def encrypt_snapshot(db_bytes: bytes, master_key: bytes) -> bytes:
+    """Register bytes -> the portable snapshot blob (see module docstring
+    for the format)."""
     compressed = zstandard.ZstdCompressor(level=9).compress(db_bytes)
     nonce = os.urandom(keys.NONCE_LEN)
     return (
@@ -72,6 +74,8 @@ def encrypt_snapshot(db_bytes: bytes, master_key: bytes) -> bytes:
 
 
 def decrypt_snapshot(blob: bytes, master_key: bytes) -> bytes:
+    """Snapshot blob -> raw register bytes; loud, specific errors for a
+    wrong key vs. a file that was never a snapshot."""
     if not blob.startswith(_SNAPSHOT_MAGIC):
         raise ScatterboxError("not a scatterbox register snapshot (bad magic)")
     body = blob[len(_SNAPSHOT_MAGIC) :]

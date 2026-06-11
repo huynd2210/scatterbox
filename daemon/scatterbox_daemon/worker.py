@@ -64,6 +64,8 @@ async def run_snapshotter(state: DaemonState) -> None:
 
 
 async def _run_job(state: DaemonState, row) -> None:
+    """Dispatch one claimed job to its handler and record/broadcast the
+    outcome. A failing job marks itself failed; the worker survives."""
     job_id, kind = row["id"], row["kind"]
     payload = json.loads(row["payload"] or "{}")
     await state.ws.broadcast(
@@ -92,6 +94,8 @@ async def _run_job(state: DaemonState, row) -> None:
 
 
 async def _upload(state: DaemonState, job_id: int, p: dict) -> dict:
+    """Run a spooled upload through the core pipeline, streaming per-chunk
+    progress to the WebSocket; consumes the spool file either way."""
     if state.vault is None:
         raise ScatterboxError("daemon is locked — unlock before uploading")
     tmp = Path(p["tmp_path"])
@@ -130,11 +134,14 @@ async def _upload(state: DaemonState, job_id: int, p: dict) -> dict:
 
 
 async def _delete(state: DaemonState, job_id: int, p: dict) -> dict:
+    """Delete a file's replicas (provider I/O) and its register entry."""
     await pipeline.remove_file(state.register, p["vpath"], secrets=state.vault)
     return {"vpath": p["vpath"]}
 
 
 async def _scrub(state: DaemonState, job_id: int, p: dict) -> dict:
+    """Run one scrub cycle (optionally deep / with repair) and report the
+    tally the transfers panel shows."""
     report = await scrubber.scrub(
         state.register,
         deep=p.get("deep", False),

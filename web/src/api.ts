@@ -1,3 +1,6 @@
+// Typed client for the daemon's HTTP API (see docs/FEATURES.md §12 for
+// the endpoint reference). Every helper throws an Error carrying the
+// daemon's `detail` message, so components can show it verbatim.
 import type {
   FileDetail,
   Health,

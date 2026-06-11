@@ -22,6 +22,7 @@ MAX_N = 255
 
 
 def validate_params(k: int, n: int) -> None:
+    """Reject ec(k,n) combinations zfec cannot do or that make no sense."""
     if not 1 <= k < n <= MAX_N:
         raise ScatterboxError(
             f"invalid erasure coding parameters ec({k},{n}): need 1 <= k < n <= {MAX_N}"
@@ -29,6 +30,7 @@ def validate_params(k: int, n: int) -> None:
 
 
 def share_size(data_len: int, k: int) -> int:
+    """Bytes per share for a chunk of data_len split k ways."""
     return max(-(-data_len // k), 1)  # ceil; 1-byte floor keeps zfec happy on tiny chunks
 
 

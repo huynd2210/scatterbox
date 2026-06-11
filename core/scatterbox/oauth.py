@@ -60,6 +60,8 @@ class _RedirectCatcher(BaseHTTPRequestHandler):
     result: dict[str, str] = {}
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+        """Capture the OAuth redirect's query params and show the user a
+        you-can-close-this-tab page."""
         query = urllib.parse.urlparse(self.path).query
         params = dict(urllib.parse.parse_qsl(query))
         type(self).result = params
@@ -188,6 +190,7 @@ class TokenManager:
         self._transport = transport
 
     async def access_token(self) -> str:
+        """A currently-valid bearer token, refreshing if (nearly) expired."""
         if time.time() < self._blob["expires_at"] - _EXPIRY_SKEW_S:
             return self._blob["access_token"]
         return await self.refresh()

@@ -62,6 +62,9 @@ _PROFILE = ProviderProfile(
 
 
 class GDriveProvider:
+    """Provider adapter for Google Drive (module docstring covers scope,
+    folder, and upload-protocol decisions)."""
+
     transform: Transform | None = None
 
     def __init__(
@@ -82,6 +85,8 @@ class GDriveProvider:
         self._capacity_bytes = capacity_bytes
 
     def profile(self) -> ProviderProfile:
+        """Static class profile (PLAN.md §6 priors), with the per-instance
+        object-size cap applied when the user configured one."""
         if self._max_object_bytes is None:
             return _PROFILE
         # user-configured per-instance cap (PLAN.md §6: always respected)
@@ -117,6 +122,8 @@ class GDriveProvider:
         )
 
     async def _ensure_folder(self) -> str:
+        """Find-or-create the visible scatterbox/ folder; caches the id for
+        this adapter's lifetime (persisted via learned_config)."""
         if self._folder_id:
             return self._folder_id
         q = (
@@ -147,6 +154,8 @@ class GDriveProvider:
     # -- Provider interface ------------------------------------------------------
 
     async def put(self, chunk_id: str, data: bytes) -> RemoteRef:
+        """Upload one stored object via the resumable protocol; returns the
+        Drive file id as the ref."""
         if self._max_object_bytes is not None and len(data) > self._max_object_bytes:
             raise ObjectTooLargeError(
                 f"object of {len(data)} bytes exceeds configured max "
@@ -182,6 +191,7 @@ class GDriveProvider:
         return RemoteRef(resp.json()["id"])
 
     async def get(self, ref: RemoteRef) -> bytes:
+        """Download an object's bytes (alt=media on the file id)."""
         resp = self._check(
             await self._http.request("GET", f"{_API}/files/{ref.value}?alt=media"),
             "download",
@@ -189,12 +199,14 @@ class GDriveProvider:
         return resp.content
 
     async def delete(self, ref: RemoteRef) -> None:
+        """Delete by file id; already-gone is success (idempotent)."""
         resp = await self._http.request("DELETE", f"{_API}/files/{ref.value}")
         if resp.status_code == 404:
             return  # already gone — deletion is idempotent
         self._check(resp, "delete")
 
     async def exists(self, ref: RemoteRef) -> bool:
+        """Cheap scrub probe: metadata fetch, no content download."""
         resp = await self._http.request(
             "GET", f"{_API}/files/{ref.value}?fields=id,trashed"
         )
@@ -206,6 +218,8 @@ class GDriveProvider:
         return not resp.json().get("trashed", False)
 
     async def quota(self) -> Quota:
+        """Account storage numbers from the about endpoint — 'exact'
+        confidence, optionally tightened by the user's capacity cap."""
         resp = self._check(
             await self._http.request("GET", f"{_API}/about?fields=storageQuota"),
             "quota",

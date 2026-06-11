@@ -17,6 +17,9 @@ from scatterbox.providers.base import ProviderProfile, Quota, RemoteRef, Transfo
 
 
 class LocalFSProvider:
+    """Provider adapter for a plain local directory (module docstring
+    explains why it exists and what it simulates)."""
+
     transform: Transform | None = None  # no encode/decode stage for plain files
 
     def __init__(
@@ -81,6 +84,7 @@ class LocalFSProvider:
         return self._path(ref).is_file()
 
     async def quota(self) -> Quota:
+        """Configured cap = 'estimated' confidence; no cap = 'unknown'."""
         used = self._used_bytes()
         if self.capacity_bytes is not None:
             # We know the cap only because the user configured it -> 'estimated'

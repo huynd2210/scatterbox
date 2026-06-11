@@ -113,6 +113,8 @@ def policy_to_dict(policy: Policy) -> dict:
 
 
 def policy_from_dict(data: dict) -> Policy:
+    """Inverse of policy_to_dict: stored JSON -> Policy, defaults filling
+    anything the (sparse) dict does not mention."""
     kwargs: dict = {k: v for k, v in data.items() if k in (
         "replicas", "min_spread", "spread_mode", "spread_cap",
         "scheme", "ec_k", "ec_n",

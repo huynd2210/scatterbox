@@ -42,6 +42,9 @@ class WSManager:
 
 @dataclass
 class DaemonState:
+    """Everything one daemon instance owns, threaded through the routes
+    and background tasks (see module docstring for the threading rules)."""
+
     home: Path
     register: Register
     vault: Vault | None = None  # None = locked; set by POST /api/unlock

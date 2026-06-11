@@ -4,6 +4,10 @@ import { api, healthDots, humanBytes } from "../api";
 import type { FileDetail, FileEntry, Health, Listing } from "../types";
 import { PolicyPanel } from "./PolicyPanel";
 
+// The files view: breadcrumbs + virtualized listing + drag-drop upload +
+// per-row health badges + folder policy editor. Listing data comes from the
+// index-only /api/files; health is fetched lazily for visible rows only.
+
 type Row =
   | { kind: "dir"; name: string }
   | { kind: "file"; entry: FileEntry };
@@ -212,6 +216,7 @@ export function FileBrowser({ refreshKey }: { refreshKey: number }) {
   );
 }
 
+/** One directory row; click navigates into it. */
 function DirRow({ name, onOpen }: { name: string; onOpen: () => void }) {
   return (
     <div className="cells" onDoubleClick={onOpen}>
@@ -222,6 +227,8 @@ function DirRow({ name, onOpen }: { name: string; onOpen: () => void }) {
   );
 }
 
+/** One file row: name (click = detail panel), health dots, size, and the
+ * download / move / delete actions. */
 function FileRow({
   entry,
   health,
@@ -274,6 +281,8 @@ function FileRow({
   );
 }
 
+/** The "where is this?" side panel: stat, scheme, and the per-provider
+ * replica breakdown for one file (PLAN.md §11). */
 function DetailPanel({
   detail,
   onClose,

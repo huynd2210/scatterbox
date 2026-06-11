@@ -1,3 +1,6 @@
+// App shell: routes between the three top-level screens by daemon state —
+// setup wizard (uninitialized) → unlock (locked) → tabbed explorer — and
+// fans WebSocket events out to whichever views care.
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { FileBrowser } from "./components/FileBrowser";
@@ -98,6 +101,7 @@ export default function App() {
   );
 }
 
+/** Passphrase prompt shown while the daemon is locked (423s elsewhere). */
 function UnlockScreen({ onUnlocked }: { onUnlocked: () => void }) {
   const [passphrase, setPassphrase] = useState("");
   const [error, setError] = useState<string | null>(null);

@@ -39,6 +39,9 @@ def _is_rate_limit_403(resp: httpx.Response) -> bool:
 
 
 class AuthedClient:
+    """Bearer-authenticated httpx wrapper with the retry discipline from
+    the module docstring (429/5xx backoff, 401 refresh, transport retry)."""
+
     def __init__(
         self,
         tokens: TokenManager,
@@ -58,6 +61,10 @@ class AuthedClient:
         authed: bool = True,  # pre-signed URLs (upload sessions) skip the bearer
         **kwargs,
     ) -> httpx.Response:
+        """One logical request with the full retry discipline applied.
+
+        Returns the final response (which may still be an error status the
+        adapter must map); raises only on persistent transport failure."""
         refreshed = False
         last_exc: Exception | None = None
         headers = dict(kwargs.pop("headers", None) or {})
@@ -93,6 +100,8 @@ class AuthedClient:
         return resp  # exhausted retries on a retryable status — caller decides
 
     async def _sleep(self, attempt: int, retry_after: str | None) -> None:
+        """Back off before a retry: honor Retry-After when given, else
+        exponential with jitter."""
         if retry_after is not None:
             try:
                 await asyncio.sleep(float(retry_after))

@@ -52,6 +52,9 @@ _PROFILE = ProviderProfile(
 
 
 class OneDriveProvider:
+    """Provider adapter for OneDrive personal via Microsoft Graph (module
+    docstring covers the app folder and fragment-upload rules)."""
+
     transform: Transform | None = None
 
     def __init__(
@@ -70,6 +73,8 @@ class OneDriveProvider:
         self._capacity_bytes = capacity_bytes
 
     def profile(self) -> ProviderProfile:
+        """Static class profile (PLAN.md §6 priors), with the per-instance
+        object-size cap applied when the user configured one."""
         if self._max_object_bytes is None:
             return _PROFILE
         return ProviderProfile(
@@ -94,6 +99,9 @@ class OneDriveProvider:
     # -- Provider interface ------------------------------------------------------
 
     async def put(self, chunk_id: str, data: bytes) -> RemoteRef:
+        """Upload one stored object: simple PUT up to 4 MiB, an upload
+        session with 320 KiB-aligned fragments above; returns the driveItem
+        id as the ref."""
         if self._max_object_bytes is not None and len(data) > self._max_object_bytes:
             raise ObjectTooLargeError(
                 f"object of {len(data)} bytes exceeds configured max "
@@ -144,6 +152,7 @@ class OneDriveProvider:
         return RemoteRef(resp.json()["id"])
 
     async def get(self, ref: RemoteRef) -> bytes:
+        """Download an object's bytes (follows Graph's pre-signed 302)."""
         # /content answers with a 302 to a pre-signed download URL; the
         # AuthedClient follows redirects.
         resp = self._check(
@@ -153,12 +162,15 @@ class OneDriveProvider:
         return resp.content
 
     async def delete(self, ref: RemoteRef) -> None:
+        """Delete by item id; already-gone is success (idempotent)."""
         resp = await self._http.request("DELETE", f"{_GRAPH}/me/drive/items/{ref.value}")
         if resp.status_code == 404:
             return  # already gone — deletion is idempotent
         self._check(resp, "delete")
 
     async def exists(self, ref: RemoteRef) -> bool:
+        """Cheap scrub probe: metadata fetch; the deleted facet counts as
+        missing so repair makes a real copy."""
         resp = await self._http.request(
             "GET", f"{_GRAPH}/me/drive/items/{ref.value}?$select=id,deleted"
         )
@@ -168,6 +180,8 @@ class OneDriveProvider:
         return "deleted" not in resp.json()
 
     async def quota(self) -> Quota:
+        """Drive quota from Graph — 'exact' confidence, optionally tightened
+        by the user's capacity cap."""
         resp = self._check(
             await self._http.request("GET", f"{_GRAPH}/me/drive?$select=quota"),
             "quota",

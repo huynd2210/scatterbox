@@ -76,6 +76,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
   );
 }
 
+/** One provider card: capacity bar with its confidence label, learned
+ * reliability, replicas held, remove action. */
 function ProviderCard({ p, onRemove }: { p: ProviderInfo; onRemove: () => void }) {
   const q = p.quota;
   const frac =

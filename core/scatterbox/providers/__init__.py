@@ -68,6 +68,8 @@ class AdapterSpec:
     user_addable: bool = True
 
 
+# The factories below turn a register row's JSON config into a live
+# adapter — the only place config keys are interpreted per type.
 def _localfs_factory(config: dict, secrets: SecretStore | None) -> Provider:
     return LocalFSProvider(
         root=config["root"],
