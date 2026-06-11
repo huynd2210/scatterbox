@@ -1,110 +1,94 @@
-# TASKS.md — Phase 2: Real providers + vault
+# TASKS.md — Phase 3: Daemon + Web explorer
 
-**Status: code complete (2026-06-11) — tasks 1–6 done, offline suite green
-(115 tests). Task 7's real-credential gates (round-trip on real Drive/
-OneDrive, manual revoke-and-heal) need the user's OAuth client apps and
-accounts; see task 7 for how to run them.**
+**Status: in progress (started 2026-06-11).**
+Phase 2 note: code complete; its real-credential gates (real Drive/OneDrive
+round-trip, manual revoke-and-heal) remain open and are tracked in PLAN.md
+§12 — the user runs them when ready. Nothing in Phase 3 depends on them.
 
-Read `PLAN.md` first (§6 providers, §9 vault, §12 Phase 2). Phases 0–1 are
-complete — build on `core/scatterbox/`, don't restructure it. Work the tasks
-in order; each has its own verify gate.
+Read `PLAN.md` first (§4 architecture, §11 UX, §12 Phase 3). Build on
+`core/scatterbox/` — the daemon imports the same library functions the CLI
+uses (one code path); no storage logic in the daemon or the UI.
 
-## 1. Vault v2 — encrypted secrets store ✅
+## 1. Core support work
 
-Extend `core/scatterbox/vault.py`: a `secrets` section in the vault file — a
-JSON map encrypted as one AES-256-GCM blob under the master key. The unlocked
-`Vault` implements `get_secret/set_secret/delete_secret` (JSON values),
-persisting atomically on every write. v1 vault files (no secrets section)
-unlock fine and upgrade to v2 on first write. A `SecretStore` protocol so
-adapters/tests don't depend on the Vault class.
+- **Fast listing:** `Register.list_children(vpath)` — SQL range scan over the
+  vpath index (two queries: direct files, distinct first-level subdir names)
+  instead of `list_all_files()`'s full-table scan in Python. `pipeline.list_dir`
+  switches to it. This is what buys the <100 ms browse gate at 50k files.
+- **Move/rename:** `pipeline.move_path(register, src, dst)` — single file or
+  whole directory subtree (prefix rewrite), VPathExists checks, one transaction.
+- **Job queue CRUD on the register:** add/claim/update/list for the existing
+  `jobs` table (pending → running → done/failed, payload JSON, result JSON).
+- **Upload progress hook:** optional `on_progress(bytes_done, bytes_total)`
+  callback on `put_file` (called per chunk) so the daemon can stream progress.
 
-*Verify:* unit tests — secrets round-trip across lock/unlock; v1 file
-upgrades; vault file never contains plaintext secrets; wrong passphrase still
-rejected.
+*Verify:* unit tests incl. a 50k-file index seeded in one transaction —
+`list_children` at the root and nested stays well under 100 ms.
 
-## 2. OAuth foundation ✅
+## 2. Daemon (FastAPI, `daemon/scatterbox_daemon/`)
 
-`core/scatterbox/oauth.py`:
+Local-only by default (binds 127.0.0.1). Holds the register open and the
+vault **in memory only after an explicit unlock**:
 
-- **Loopback flow (sync, CLI-driven):** authorization-code + PKCE against a
-  local `127.0.0.1:<random port>` redirect; opens the browser, catches the
-  code, exchanges it for tokens. Works for Google (client_id + client_secret)
-  and Microsoft (public client, id only).
-- **TokenManager (async):** hands out a valid access token, refreshing via
-  the refresh-token grant when expired (60 s skew); persists rotated refresh
-  tokens back to the SecretStore (Microsoft rotates them).
+- `POST /api/unlock` {passphrase} / `POST /api/lock` / `GET /api/status`
+  (locked?, counts, global durability % of chunks at full floor)
+- **VFS:** `GET /api/files?path=` (children via list_children),
+  `GET /api/file?path=` (stat + health + replica detail: which providers),
+  `POST /api/move`, `DELETE /api/file?path=`
+- **Health batch:** `POST /api/health` [paths] → per-file health dots (for
+  the visible rows of a virtualized list only)
+- **Transfers:** `POST /api/upload` (multipart; spools to a temp file,
+  enqueues an upload job, returns job id — the request never waits for
+  providers), `GET /api/download?path=` (streams the reassembled file),
+  job list/inspect `GET /api/jobs`
+- **Job worker:** single asyncio consumer in the daemon process; runs
+  upload/scrub jobs through the core library; progress + state transitions
+  broadcast over WebSocket
+- **WebSocket `/ws`:** job created/progress/done/failed events, scrub
+  reports — the UI's live feed
+- **Providers:** `GET /api/providers` (quota + confidence + reliability +
+  replica counts), `POST /api/scrub` (enqueue scrub job, options deep/repair)
 
-New dependency: `httpx` (pre-approved — PLAN.md §3 names it in the stack).
+*Verify:* API tests via httpx ASGI transport — upload returns before any
+provider I/O completes (job-based); locked daemon refuses crypto endpoints;
+move/rm/list round-trip; WS receives job lifecycle; health endpoint flips
+within one scrub cycle after chaos-provider failure injection.
 
-*Verify:* unit tests with mocked transports — PKCE challenge is S256; expired
-token triggers exactly one refresh; rotated refresh token is persisted.
+## 3. Web explorer (`web/`, React + Vite + TypeScript)
 
-## 3. Google Drive adapter ✅
+Talks to the daemon over HTTP + WS. Pages (simple tabs, no router dep):
 
-`core/scatterbox/providers/gdrive.py`, type `"gdrive"`. Scope
-`drive.file`; objects live in a visible `scatterbox/` folder (created lazily,
-folder id cached in config) so the user can manually delete files — required
-by the phase verify gate. Resumable upload (`uploadType=resumable`), download
-via `alt=media`, `exists` via metadata fetch (trashed ⇒ missing), exact quota
-from `about.storageQuota`. 429/403-rate-limit/5xx → exponential backoff +
-`Retry-After`; 401 → one token refresh + retry.
+- **Files:** breadcrumb navigation, virtualized list (@tanstack/react-virtual),
+  drag-drop + button upload, download, rename/move, delete; per-row badges —
+  health dots (●●●/●●○/●○○/lost), replica count, size; lazy health fetch for
+  visible rows only; "where is this?" detail panel per file listing providers.
+- **Transfers:** live job list from /ws (progress bars, states, errors).
+- **Providers:** capacity bars **with confidence labels** (exact/estimated/
+  unknown — never lie about precision), reliability score, scrub button
+  (normal/deep/repair). Unlock screen when the daemon is locked.
 
-*Verify:* offline tests via injected MockTransport for every operation +
-retry/refresh paths; env-gated real round-trip test.
+*Verify:* `npm run build` clean (strict TS); daemon serves `web/dist` at `/`
+so `scatterbox daemon` is the whole product.
 
-## 4. OneDrive adapter ✅
+## 4. Packaging + CLI
 
-`core/scatterbox/providers/onedrive.py`, type `"onedrive"`. Microsoft Graph,
-app folder (`special/approot`), scope `Files.ReadWrite.AppFolder
-offline_access`. Small objects via simple PUT; >4 MiB via upload session with
-320 KiB-aligned fragments. Same retry/refresh discipline as gdrive. Exact
-quota from `/me/drive`.
+- `scatterbox daemon [--host --port]` CLI command (uvicorn).
+- pyproject: add `daemon/scatterbox_daemon` to the hatchling packages list
+  (one distribution — not a workspace); new deps: fastapi, uvicorn,
+  python-multipart.
 
-*Verify:* same shape as task 3, plus fragment alignment unit test.
+## 5. Phase gate (PLAN.md §12)
 
-## 5. Secrets threading ✅
-
-`create_provider(type_, config, secrets=None)`; `load_providers(register,
-secrets=None)`; `secrets` param on `get_file`, `remove_file`, `scrub`.
-`providers.requires_secrets(type_)` tells the CLI whether a command must
-unlock the vault (rm/scrub/provider-list unlock only when a registered
-provider needs it; put/get already unlock for the master key).
-
-*Verify:* full Phase 0/1 suite still green (localfs/chaos need no secrets);
-unit test that a gdrive row without an unlocked vault fails loudly.
-
-## 6. CLI onboarding + per-instance limits ✅
-
-`scatterbox provider add <name> --type gdrive|onedrive|localfs`: prompts for
-the OAuth client app credentials, runs the loopback flow, tests the
-connection (`quota()`), stores tokens + client_secret in the vault
-(`provider:<name>`), non-secret config in the register. `provider remove`
-(refuses while the provider still holds live replicas, `--force` overrides);
-`provider set <name>` for per-instance `--max-object-bytes` /
-`--capacity-bytes`. Limits respected by chunking/placement (existing
-machinery).
-
-*Verify:* CLI tests with a stubbed OAuth flow; `provider set
---max-object-bytes 1MiB` → next put produces chunks that fit (phase gate).
-
-## 7. Phase gate (PLAN.md §12) — ⏳ awaiting real credentials
-
-- [ ] Real round-trip on both providers. Onboard each
-  (`scatterbox provider add gd --type gdrive`, `... add od --type
-  onedrive`), then run the env-gated tests (`SCATTERBOX_TEST_GDRIVE=gd`
-  etc. — see tests/test_real_providers.py for the full recipe).
-- [ ] Manually revoke a file in Drive (delete a chunk from the scatterbox/
-  folder) → `scatterbox scrub --repair` detects and re-replicates.
-- [x] `max_object_bytes = 1 MiB` on a provider → chunks respect it
-  (test_provider_onboarding.py::test_max_object_bytes_limit_shrinks_chunks).
-- [x] Full suite green, no regressions (115 passed).
+- [ ] Browse operations <100 ms on a 50k-file index (automated perf test).
+- [ ] Uploads never block the UI (upload endpoint returns pre-I/O; worker
+  does provider traffic; asserted in API tests).
+- [ ] Health/tier badges reflect injected failures within one scrub cycle
+  (chaos provider → scrub job → /api/health flips; asserted in API tests).
+- [ ] Full suite green, no regressions.
 
 ## Constraints
 
-- Follow CLAUDE.md: simplicity first, surgical changes, no speculative
-  abstraction.
-- New deps: `httpx` only.
-- Adapters must be testable offline (injectable transport) — the default
-  suite never touches the network.
-- When done: update PLAN.md §12 marking Phase 2 complete with a one-line
-  deviations note, and update this file's checkboxes/status.
+- Simplicity first; the daemon is a thin shell over `core/scatterbox`.
+- UI: no component libraries; one CSS file; virtualization is the only
+  rendering dependency.
+- When done: update PLAN.md §12 and this file.

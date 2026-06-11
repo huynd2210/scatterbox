@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import posixpath
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -154,6 +155,7 @@ async def put_file(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     force_large: bool = False,
     secrets: SecretStore | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> PutResult:
     """Store a local file at a virtual path. The write path, start to finish.
 
@@ -250,6 +252,10 @@ async def put_file(
                 )
                 total_plain += len(plain)
                 seq += 1
+                if on_progress is not None:
+                    # bytes of plaintext fully replicated so far / file size —
+                    # the daemon streams this to the transfers panel
+                    on_progress(total_plain, size)
     except Exception:
         await _cleanup_uploads(uploaded)
         raise
@@ -432,28 +438,52 @@ def list_dir(
     """Immediate children of a virtual directory: (subdir names, (file, size)).
 
     There is no directory table — directories exist only implicitly as path
-    prefixes of stored files (like S3). So "list /docs" means: scan all
-    vpaths starting with "/docs/" and split what follows into direct files
-    vs first-level subdirectory names.
+    prefixes of stored files (like S3). The register answers with two
+    indexed range scans, so listing cost scales with the number of children,
+    not the size of the archive.
     """
     vpath = normalize_vpath(vpath)
     exact = register.get_file(vpath)
     if exact is not None:
         return [], [(posixpath.basename(vpath), exact["size"])]
-    prefix = "/" if vpath == "/" else vpath + "/"
-    dirs: set[str] = set()
-    files: list[tuple[str, int]] = []
-    for row in register.list_all_files():
-        if not row["vpath"].startswith(prefix):
-            continue
-        rest = row["vpath"][len(prefix) :]
-        if "/" in rest:
-            dirs.add(rest.split("/", 1)[0])
-        else:
-            files.append((rest, row["size"]))
+    dirs, file_rows = register.list_children(vpath)
+    files = [(posixpath.basename(row["vpath"]), row["size"]) for row in file_rows]
     if not dirs and not files and vpath != "/":
         raise VPathNotFoundError(f"{vpath} not found")
-    return sorted(dirs), sorted(files)
+    return dirs, files
+
+
+def move_path(register: Register, src: str, dst: str) -> int:
+    """Rename/move a file or a whole directory subtree; returns the number
+    of files moved.
+
+    Pure metadata: chunks never move or re-encrypt, only vpaths change.
+    A trailing slash on dst (or dst being an existing directory) means
+    "move INTO": `mv /a.txt /docs/` -> /docs/a.txt, like a shell mv.
+    """
+    into = dst.endswith("/")
+    src = normalize_vpath(src)
+    dst = normalize_vpath(dst)
+    if src == "/":
+        raise ScatterboxError("cannot move the root directory")
+    if dst == src or dst.startswith(src + "/"):
+        raise ScatterboxError(f"cannot move {src} into itself")
+    if into or register.list_children(dst)[1] or register.list_children(dst)[0]:
+        dst = normalize_vpath(dst + "/" + posixpath.basename(src))
+
+    rec = register.get_file(src)
+    if rec is not None:  # single file
+        if register.get_file(dst) is not None:
+            raise VPathExistsError(f"{dst} already exists")
+        register.move_file(rec["id"], dst)
+        return 1
+    # directory: every file under src/ gets its prefix rewritten
+    if register.get_file(dst) is not None:
+        raise VPathExistsError(f"{dst} already exists (and is a file)")
+    moved = register.move_tree(src, dst)
+    if moved == 0:
+        raise VPathNotFoundError(f"{src} not found")
+    return moved
 
 
 __all__ = [
@@ -469,6 +499,7 @@ __all__ = [
     "get_file",
     "remove_file",
     "list_dir",
+    "move_path",
     "load_providers",
     "normalize_vpath",
 ]

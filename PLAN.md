@@ -191,9 +191,10 @@ Placement engine, N-replica writes across multiple mock providers, scrubber, re-
 *Verify:* chaos test — store 100 files across 4 mocks at N=3, kill one provider entirely + randomly delete 20% of another's chunks → scrubber heals, every file restores byte-identical.
 *Deviations:* durability-chasing extra replicas are capped at floor+2 (per §7's "3–4 copies" example); repair's diversity rule bars only *live* copies, so a provider whose replica of a chunk is suspect can host the fresh copy (the stale row is superseded to `lost`) — necessary to meet the floor with 4 providers and two damaged; file health has an explicit fourth `lost` state beyond §8's three dots.
 
-**Phase 2 — Real providers + vault**
+**Phase 2 — Real providers + vault** ✅ **Code complete (2026-06-11); real-credential gates pending**
 Google Drive + OneDrive adapters (OAuth flow, rate-limit handling, resumable upload), secret vault (passphrase-encrypted credentials/master key), provider onboarding via CLI, per-instance configurable limits, quota tracking.
 *Verify:* real round-trip on both; revoke a file in Drive manually → scrubber detects and re-replicates; set `max_object_bytes=1 MiB` on a provider → chunks respect it.
+*Status:* offline gates green (max_object_bytes respected, 115+ tests, all adapter paths mock-transport tested). Still open, needs the user's OAuth apps: (1) real round-trips — onboard providers then run the env-gated tests (recipe in tests/test_real_providers.py docstring); (2) manual revoke-in-Drive → `scrub --repair` heals. Mark this line fully complete when both pass.
 
 **Phase 3 — Daemon + Web explorer**
 FastAPI daemon, job queue, React explorer with virtualized listing, transfers panel, badges/health UI, provider dashboard.

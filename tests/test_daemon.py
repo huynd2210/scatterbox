@@ -1,0 +1,218 @@
+"""Daemon API tests (TASKS.md Phase 3 §2) — including two phase gates:
+uploads never block (job-based, returns pre-I/O) and health badges reflect
+injected failures within one scrub cycle."""
+
+import json
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from scatterbox import vault
+from scatterbox.register import Register
+from scatterbox_daemon import create_app
+
+PASS = "correct horse battery staple"
+
+
+@pytest.fixture
+def home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    reg = Register(home / "register.db")
+    for i in range(3):
+        reg.add_provider(f"p{i}", "localfs", {"root": str(tmp_path / f"prov{i}")})
+    reg.close()
+    # cheap KDF so unlock doesn't dominate the test suite
+    vault.create_vault(
+        home / "vault.json", PASS, time_cost=1, memory_cost=8 * 1024, parallelism=1
+    )
+    return home
+
+
+@pytest.fixture
+def client(home):
+    with TestClient(create_app(home)) as c:
+        yield c
+
+
+def unlock(client):
+    resp = client.post("/api/unlock", json={"passphrase": PASS})
+    assert resp.status_code == 200
+
+
+def wait_job(client, job_id, timeout=15):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = next(j for j in client.get("/api/jobs").json() if j["id"] == job_id)
+        if job["state"] in ("done", "failed"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish")
+
+
+def test_lock_unlock_flow(client):
+    assert client.get("/api/status").json()["locked"] is True
+    assert client.post("/api/unlock", json={"passphrase": "wrong"}).status_code == 401
+    unlock(client)
+    assert client.get("/api/status").json()["locked"] is False
+    client.post("/api/lock")
+    assert client.get("/api/status").json()["locked"] is True
+
+
+def test_upload_requires_unlock(client):
+    resp = client.post(
+        "/api/upload", files={"file": ("a.bin", b"data")}, data={"path": "/"}
+    )
+    assert resp.status_code == 423
+
+
+def test_upload_download_roundtrip(client):
+    unlock(client)
+    data = b"the quick brown fox" * 5000
+    resp = client.post(
+        "/api/upload", files={"file": ("fox.bin", data)}, data={"path": "/docs/"}
+    )
+    assert resp.status_code == 200
+    job = wait_job(client, resp.json()["job_id"])
+    assert job["state"] == "done", job
+    assert job["result"]["vpath"] == "/docs/fox.bin"
+
+    listing = client.get("/api/files", params={"path": "/docs"}).json()
+    assert [f["name"] for f in listing["files"]] == ["fox.bin"]
+
+    dl = client.get("/api/download", params={"path": "/docs/fox.bin"})
+    assert dl.status_code == 200
+    assert dl.content == data
+
+    # duplicate upload is rejected up front, not at job time
+    resp = client.post(
+        "/api/upload", files={"file": ("fox.bin", b"x")}, data={"path": "/docs/"}
+    )
+    assert resp.status_code == 409
+
+
+def test_upload_returns_before_provider_io(home, tmp_path):
+    """Phase gate: the upload request must not wait for providers. Providers
+    here sleep 1 s per operation; the endpoint must return well before that."""
+    reg = Register(home / "register.db")
+    for row in reg.list_providers():
+        config = json.loads(row["config"])
+        reg.update_provider_config(row["id"], {**config, "latency_s": 1.0})
+        reg.conn.execute("UPDATE providers SET type = 'chaos' WHERE id = ?", (row["id"],))
+        reg.conn.commit()
+    reg.close()
+    with TestClient(create_app(home)) as client:
+        unlock(client)
+        start = time.perf_counter()
+        resp = client.post(
+            "/api/upload", files={"file": ("slow.bin", b"y" * 100_000)}, data={"path": "/"}
+        )
+        elapsed = time.perf_counter() - start
+        assert resp.status_code == 200
+        assert elapsed < 0.9, f"upload endpoint blocked for {elapsed:.2f}s"
+        job = wait_job(client, resp.json()["job_id"])
+        assert job["state"] == "done"
+
+
+def test_move_and_delete(client):
+    unlock(client)
+    resp = client.post(
+        "/api/upload", files={"file": ("a.bin", b"abc" * 1000)}, data={"path": "/"}
+    )
+    wait_job(client, resp.json()["job_id"])
+
+    assert client.post("/api/move", json={"src": "/a.bin", "dst": "/b.bin"}).status_code == 200
+    names = [f["name"] for f in client.get("/api/files", params={"path": "/"}).json()["files"]]
+    assert names == ["b.bin"]
+
+    resp = client.delete("/api/file", params={"path": "/b.bin"})
+    assert resp.status_code == 200
+    job = wait_job(client, resp.json()["job_id"])
+    assert job["state"] == "done"
+    assert client.get("/api/files", params={"path": "/"}).json()["files"] == []
+    assert client.delete("/api/file", params={"path": "/b.bin"}).status_code == 404
+
+
+def test_file_detail_shows_providers_and_health(client):
+    unlock(client)
+    resp = client.post(
+        "/api/upload", files={"file": ("d.bin", b"detail" * 2000)}, data={"path": "/"}
+    )
+    wait_job(client, resp.json()["job_id"])
+    detail = client.get("/api/file", params={"path": "/d.bin"}).json()
+    assert detail["health"] == "healthy"
+    assert detail["min_live"] == 3 and detail["replica_target"] == 3
+    assert len(detail["providers"]) == 3
+    assert all(p["states"].get("stored", 0) >= 1 for p in detail["providers"])
+
+
+def test_health_flips_within_one_scrub_cycle(home, tmp_path):
+    """Phase gate: injected failure -> badge change after a single scrub."""
+    with TestClient(create_app(home)) as client:
+        unlock(client)
+        resp = client.post(
+            "/api/upload", files={"file": ("h.bin", b"health" * 3000)}, data={"path": "/"}
+        )
+        assert wait_job(client, resp.json()["job_id"])["state"] == "done"
+        health = client.post("/api/health", json={"paths": ["/h.bin"]}).json()
+        assert health["/h.bin"]["health"] == "healthy"
+
+    # hard-kill one provider (config-level, like a dead account)
+    reg = Register(home / "register.db")
+    row = reg.list_providers()[0]
+    config = json.loads(row["config"])
+    reg.update_provider_config(row["id"], {**config, "killed": True})
+    reg.conn.execute("UPDATE providers SET type = 'chaos' WHERE id = ?", (row["id"],))
+    reg.conn.commit()
+    reg.close()
+
+    with TestClient(create_app(home)) as client:
+        unlock(client)
+        job_id = client.post("/api/scrub", json={}).json()["job_id"]
+        report = wait_job(client, job_id)
+        assert report["state"] == "done"
+        assert report["result"]["marked_suspect"] >= 1
+        health = client.post("/api/health", json={"paths": ["/h.bin"]}).json()
+        assert health["/h.bin"]["health"] == "degraded"
+        assert health["/h.bin"]["min_live"] == 2
+
+
+def test_websocket_streams_job_lifecycle(client):
+    unlock(client)
+    with client.websocket_connect("/ws") as ws:
+        resp = client.post(
+            "/api/upload", files={"file": ("w.bin", b"ws" * 5000)}, data={"path": "/"}
+        )
+        job_id = resp.json()["job_id"]
+        states = []
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            msg = ws.receive_json()
+            if msg.get("type") == "job" and msg.get("id") == job_id:
+                states.append(msg["state"])
+                if msg["state"] in ("done", "failed"):
+                    break
+        assert states[0] == "running" and states[-1] == "done"
+
+
+def test_providers_endpoint_reports_quota_confidence(client):
+    providers = client.get("/api/providers").json()
+    assert len(providers) == 3
+    for p in providers:
+        assert p["quota"]["confidence"] == "unknown"  # localfs without cap
+        assert p["reliability"] == pytest.approx(0.99)
+        assert p["error"] is None
+
+
+def test_status_counts(client):
+    unlock(client)
+    resp = client.post(
+        "/api/upload", files={"file": ("s.bin", b"status" * 1000)}, data={"path": "/"}
+    )
+    wait_job(client, resp.json()["job_id"])
+    status = client.get("/api/status").json()
+    assert status["files"] == 1
+    assert status["providers"] == 3
+    assert status["chunks_total"] >= 1
+    assert status["chunks_at_floor"] == status["chunks_total"]

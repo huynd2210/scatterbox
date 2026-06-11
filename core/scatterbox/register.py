@@ -114,6 +114,10 @@ _MIGRATIONS = [
     """
     ALTER TABLE manifests ADD COLUMN spread_cap INTEGER NOT NULL DEFAULT 1;
     """,
+    # v5 — Phase 3 daemon: job outcome (result JSON or {"error": ...}).
+    """
+    ALTER TABLE jobs ADD COLUMN result TEXT;
+    """,
 ]
 
 # Replica lifecycle (TASKS.md §3). Same-state transitions are idempotent no-ops;
@@ -136,6 +140,10 @@ _REPLICA_TRANSITIONS = {
 # the observation is 1.0 for success, 0.0 for failure.)
 RELIABILITY_ALPHA_UP = 0.05
 RELIABILITY_ALPHA_DOWN = 0.30
+
+# Upper bound for vpath range scans: sorts after every valid character, so
+# [prefix, prefix + sentinel) covers exactly the subtree under prefix.
+_VPATH_SENTINEL = chr(0x10FFFF)
 
 
 class Register:
@@ -271,6 +279,77 @@ class Register:
         return self.conn.execute(
             "SELECT vpath, size FROM files ORDER BY vpath"
         ).fetchall()
+
+    def list_children(self, vpath: str) -> tuple[list[str], list[sqlite3.Row]]:
+        """Immediate children of a virtual directory: (subdir names, file rows).
+
+        Two indexed range scans over files.vpath (the UNIQUE index), so a
+        directory listing costs O(children) regardless of how many files the
+        register holds — this is what keeps browsing <100 ms at 50k files
+        (PLAN.md §12 Phase 3 gate). '\\uffff' sorts after every character
+        that can appear in a normalized vpath, closing the range.
+        """
+        prefix = "/" if vpath == "/" else vpath + "/"
+        plen = len(prefix)
+        # Direct files: rows under the prefix whose remainder has no '/'.
+        files = self.conn.execute(
+            """
+            SELECT vpath, size, mtime FROM files
+            WHERE vpath >= ? AND vpath < ?
+              AND instr(substr(vpath, ?), '/') = 0
+            ORDER BY vpath
+            """,
+            (prefix, prefix + _VPATH_SENTINEL, plen + 1),
+        ).fetchall()
+        # First-level subdirectories: distinct text between the prefix and
+        # the next '/'. Directories exist only implicitly (S3-style).
+        dirs = [
+            row[0]
+            for row in self.conn.execute(
+                """
+                SELECT DISTINCT substr(vpath, ?, instr(substr(vpath, ?), '/') - 1)
+                FROM files
+                WHERE vpath >= ? AND vpath < ?
+                  AND instr(substr(vpath, ?), '/') > 0
+                ORDER BY 1
+                """,
+                (plen + 1, plen + 1, prefix, prefix + _VPATH_SENTINEL, plen + 1),
+            )
+        ]
+        return dirs, files
+
+    def move_file(self, file_id: int, new_vpath: str) -> None:
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE files SET vpath = ? WHERE id = ?", (new_vpath, file_id)
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ScatterboxError(f"{new_vpath} already exists") from exc
+
+    def move_tree(self, old_prefix: str, new_prefix: str) -> int:
+        """Rename every vpath under old_prefix/ to new_prefix/ in one
+        transaction; returns the number of files moved."""
+        try:
+            with self.conn:
+                cur = self.conn.execute(
+                    """
+                    UPDATE files SET vpath = ? || substr(vpath, ?)
+                    WHERE vpath >= ? || '/' AND vpath < ? || '/' || ?
+                    """,
+                    (
+                        new_prefix,
+                        len(old_prefix) + 1,
+                        old_prefix,
+                        old_prefix,
+                        _VPATH_SENTINEL,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ScatterboxError(
+                f"cannot move {old_prefix} to {new_prefix}: a target path already exists"
+            ) from exc
+        return cur.rowcount
 
     def insert_file_with_manifest(
         self,
@@ -437,6 +516,45 @@ class Register:
         (PLAN.md §8 dots)."""
         return derive_health(self.min_live_replicas(manifest_id), replica_target)
 
+    def count_files(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+
+    def file_provider_summary(self, manifest_id: int) -> list[sqlite3.Row]:
+        """Per-provider replica breakdown for one file — the "where is this?"
+        detail panel (PLAN.md §11): provider name/type and how many of the
+        file's replicas it holds in each state."""
+        return self.conn.execute(
+            """
+            SELECT p.id AS provider_id, p.name, p.type, r.state, COUNT(*) AS n
+            FROM replicas r
+            JOIN chunks c ON c.id = r.chunk_id
+            JOIN providers p ON p.id = r.provider_id
+            WHERE c.manifest_id = ?
+            GROUP BY p.id, r.state
+            ORDER BY p.id
+            """,
+            (manifest_id,),
+        ).fetchall()
+
+    def durability_summary(self) -> tuple[int, int]:
+        """(chunks at or above their replica floor, total chunks) — the
+        global durability indicator (PLAN.md §11)."""
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN live >= replica_target THEN 1 ELSE 0 END) AS ok
+            FROM (
+                SELECT m.replica_target,
+                       SUM(CASE WHEN r.state = 'stored' THEN 1 ELSE 0 END) AS live
+                FROM chunks c
+                JOIN manifests m ON m.id = c.manifest_id
+                LEFT JOIN replicas r ON r.chunk_id = c.id
+                GROUP BY c.id
+            )
+            """
+        ).fetchone()
+        return (row["ok"] or 0, row["total"] or 0)
+
     # -- scrubber --------------------------------------------------------------
 
     def replicas_for_scrub(self, limit: int | None = None) -> list[sqlite3.Row]:
@@ -511,6 +629,74 @@ class Register:
             {"m": manifest_id, "g": spread_group, "cap": spread_cap},
         ).fetchall()
         return [row["provider_id"] for row in rows]
+
+    # -- jobs (daemon queue, Phase 3) -------------------------------------------
+    # Lifecycle: pending -> running -> done | failed. The table is the
+    # durable queue; progress percentages are transient and live in the
+    # daemon's memory/WebSocket, not here.
+
+    def add_job(self, kind: str, payload: dict) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO jobs (kind, payload, state, created_at) VALUES (?, ?, 'pending', ?)",
+                (kind, json.dumps(payload), time.time()),
+            )
+        return cur.lastrowid
+
+    def claim_next_job(self) -> sqlite3.Row | None:
+        """Atomically move the oldest pending job to running and return it.
+
+        The UPDATE..RETURNING form is a single statement, so two workers can
+        never claim the same job even on a shared database.
+        """
+        with self.conn:
+            row = self.conn.execute(
+                """
+                UPDATE jobs SET state = 'running', updated_at = ?
+                WHERE id = (
+                    SELECT id FROM jobs WHERE state = 'pending'
+                    ORDER BY id LIMIT 1
+                )
+                RETURNING *
+                """,
+                (time.time(),),
+            ).fetchone()
+        return row
+
+    def finish_job(self, job_id: int, *, error: str | None = None, result: dict | None = None) -> None:
+        """Mark a running job done (with an optional result) or failed (with
+        the error message stored in the payload-adjacent result column)."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE jobs SET state = ?, result = ?, updated_at = ? WHERE id = ?",
+                (
+                    "failed" if error is not None else "done",
+                    json.dumps({"error": error} if error is not None else (result or {})),
+                    time.time(),
+                    job_id,
+                ),
+            )
+
+    def get_job(self, job_id: int) -> sqlite3.Row:
+        row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise ScatterboxError(f"no job with id {job_id}")
+        return row
+
+    def list_jobs(self, limit: int = 100) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def reset_orphaned_jobs(self) -> int:
+        """Jobs left 'running' by a crashed daemon go back to pending at
+        startup; returns how many were rescued."""
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE jobs SET state = 'pending', updated_at = ? WHERE state = 'running'",
+                (time.time(),),
+            )
+        return cur.rowcount
 
     def replica_state_counts(self, manifest_id: int) -> dict[str, int]:
         """How many of a file's replicas are in each state (for `status`)."""

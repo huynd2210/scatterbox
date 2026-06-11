@@ -423,6 +423,38 @@ def provider_set(
     typer.echo(f"updated provider {name}")
 
 
+@app.command()
+def mv(
+    src: Annotated[str, typer.Argument()],
+    dst: Annotated[str, typer.Argument(help="Target path; trailing / means move into.")],
+) -> None:
+    """Move/rename a virtual file or directory (metadata only — no provider I/O)."""
+    register = _open_register()
+    try:
+        moved = pipeline.move_path(register, src, dst)
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    typer.echo(f"moved {moved} file(s)")
+
+
+@app.command()
+def daemon(
+    host: Annotated[str, typer.Option(help="Bind address; keep it loopback unless you know why not.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option()] = 8420,
+) -> None:
+    """Run the scatterbox daemon (HTTP API + web explorer)."""
+    import uvicorn
+
+    from scatterbox_daemon import create_app
+
+    if not (_home() / "register.db").is_file():
+        _fail(f"not initialized at {_home()}; run 'scatterbox init' first")
+    typer.echo(f"scatterbox daemon on http://{host}:{port} (home: {_home()})")
+    uvicorn.run(create_app(_home()), host=host, port=port, log_level="warning")
+
+
 @provider_app.command("list")
 def provider_list() -> None:
     """List registered providers with quota (confidence-labelled)."""
