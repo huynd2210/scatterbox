@@ -5,3 +5,5 @@ __pycache__/
 .hypothesis/
 dist/
 *.egg-info/
+node_modules/
+.claude/launch.json

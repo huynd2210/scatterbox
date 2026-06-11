@@ -196,9 +196,10 @@ Google Drive + OneDrive adapters (OAuth flow, rate-limit handling, resumable upl
 *Verify:* real round-trip on both; revoke a file in Drive manually → scrubber detects and re-replicates; set `max_object_bytes=1 MiB` on a provider → chunks respect it.
 *Status:* offline gates green (max_object_bytes respected, 115+ tests, all adapter paths mock-transport tested). Still open, needs the user's OAuth apps: (1) real round-trips — onboard providers then run the env-gated tests (recipe in tests/test_real_providers.py docstring); (2) manual revoke-in-Drive → `scrub --repair` heals. Mark this line fully complete when both pass.
 
-**Phase 3 — Daemon + Web explorer**
+**Phase 3 — Daemon + Web explorer** ✅ **Complete (2026-06-11)**
 FastAPI daemon, job queue, React explorer with virtualized listing, transfers panel, badges/health UI, provider dashboard.
 *Verify:* browse operations <100 ms on a 50k-file index; uploads never block the UI; health/tier badges reflect injected failures within one scrub cycle.
+*Deviations:* no mkdir endpoint (directories are implicit S3-style; they appear via upload paths and move); downloads stream synchronously instead of through the job queue (the response *is* the transfer — only uploads/deletes/scrubs are jobs); job progress is transient (WebSocket + memory, not persisted in the jobs table); the web build is not committed — `npm run build` produces `web/dist`, which the daemon serves when present. All three gate criteria are automated tests (test_listing_and_move.py, test_daemon.py).
 
 **Phase 4 — Portability + recovery**
 Export/import of register + vault (UI button + CLI), automatic encrypted register snapshots to providers, restore-from-snapshot flow.

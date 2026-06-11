@@ -56,7 +56,7 @@ current work is tracked in [TASKS.md](TASKS.md).
 | 0 | Core pipeline + CLI (chunk/encrypt/hash, localfs mock, put/get/ls/rm) | ✅ |
 | 1 | Replication + repair (placement engine, scrubber, chaos-tested healing) | ✅ |
 | 2 | Real providers + vault (Google Drive, OneDrive, OAuth, secret vault) | ✅ code complete — real-credential gates pending |
-| 3 | Daemon + web explorer (FastAPI, React, virtualized listing) | — |
+| 3 | Daemon + web explorer (FastAPI, React, virtualized listing) | ✅ |
 | 4 | Portability + recovery (export/import, register snapshots to providers) | — |
 | 5 | Policies, erasure coding, exotic adapters (Discord, transform stage) | — |
 
@@ -89,6 +89,22 @@ uv run scatterbox scrub --repair             # verify + heal
 `localfs` providers are real storage (point them at different disks/mounts)
 but exist mainly to exercise the full pipeline; the interesting ones are
 below.
+
+## Web explorer
+
+```sh
+cd web && npm install && npm run build && cd ..
+uv run scatterbox daemon          # http://127.0.0.1:8420
+```
+
+The daemon serves the built UI: unlock with your passphrase, then browse
+(virtualized — 100k-file folders scroll fine), drag-drop upload with
+replica/spread options, download, move, delete. Per-file health dots and a
+"where is this?" provider panel; a live transfers tab (WebSocket job
+progress); a provider dashboard with confidence-labelled capacity bars and
+scrub buttons. Browsing reads only the local index — provider I/O happens
+in background jobs, never in a request you're waiting on. The daemon binds
+127.0.0.1 and holds the master key in memory only after an explicit unlock.
 
 ## Real providers
 
@@ -142,9 +158,11 @@ uv run pytest tests/test_chaos_gate.py -q   # the Phase 1 disaster drill
 
 Layout: `core/scatterbox/` (library: pipeline, placement, scrubber,
 register, vault, providers), `cli/scatterbox_cli/` (thin Typer wrapper),
-`tests/`, with `daemon/` and `web/` arriving in Phase 3. Adapters are
-testable offline via injected `httpx.MockTransport`s; real-credential
-round-trips are env-gated in `tests/test_real_providers.py`.
+`daemon/scatterbox_daemon/` (FastAPI shell over the same library),
+`web/` (React explorer; `npm run dev` proxies to a running daemon), and
+`tests/`. Adapters are testable offline via injected
+`httpx.MockTransport`s; real-credential round-trips are env-gated in
+`tests/test_real_providers.py`.
 
 Useful env vars: `SCATTERBOX_HOME` (default `~/.scatterbox`),
 `SCATTERBOX_PASSPHRASE` (for scripts/tests; interactive prompt otherwise).

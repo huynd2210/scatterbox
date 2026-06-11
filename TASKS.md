@@ -1,6 +1,8 @@
 # TASKS.md — Phase 3: Daemon + Web explorer
 
-**Status: in progress (started 2026-06-11).**
+**Status: ✅ complete (2026-06-11).** All gates automated and green (145
+tests); UI verified live against a real daemon (unlock → browse → upload →
+health dots → transfers). See PLAN.md §12 Phase 3 for the deviations note.
 Phase 2 note: code complete; its real-credential gates (real Drive/OneDrive
 round-trip, manual revoke-and-heal) remain open and are tracked in PLAN.md
 §12 — the user runs them when ready. Nothing in Phase 3 depends on them.
@@ -9,7 +11,7 @@ Read `PLAN.md` first (§4 architecture, §11 UX, §12 Phase 3). Build on
 `core/scatterbox/` — the daemon imports the same library functions the CLI
 uses (one code path); no storage logic in the daemon or the UI.
 
-## 1. Core support work
+## 1. Core support work ✅
 
 - **Fast listing:** `Register.list_children(vpath)` — SQL range scan over the
   vpath index (two queries: direct files, distinct first-level subdir names)
@@ -25,7 +27,7 @@ uses (one code path); no storage logic in the daemon or the UI.
 *Verify:* unit tests incl. a 50k-file index seeded in one transaction —
 `list_children` at the root and nested stays well under 100 ms.
 
-## 2. Daemon (FastAPI, `daemon/scatterbox_daemon/`)
+## 2. Daemon (FastAPI, `daemon/scatterbox_daemon/`) ✅
 
 Local-only by default (binds 127.0.0.1). Holds the register open and the
 vault **in memory only after an explicit unlock**:
@@ -54,7 +56,7 @@ provider I/O completes (job-based); locked daemon refuses crypto endpoints;
 move/rm/list round-trip; WS receives job lifecycle; health endpoint flips
 within one scrub cycle after chaos-provider failure injection.
 
-## 3. Web explorer (`web/`, React + Vite + TypeScript)
+## 3. Web explorer (`web/`, React + Vite + TypeScript) ✅
 
 Talks to the daemon over HTTP + WS. Pages (simple tabs, no router dep):
 
@@ -70,21 +72,24 @@ Talks to the daemon over HTTP + WS. Pages (simple tabs, no router dep):
 *Verify:* `npm run build` clean (strict TS); daemon serves `web/dist` at `/`
 so `scatterbox daemon` is the whole product.
 
-## 4. Packaging + CLI
+## 4. Packaging + CLI ✅
 
 - `scatterbox daemon [--host --port]` CLI command (uvicorn).
 - pyproject: add `daemon/scatterbox_daemon` to the hatchling packages list
   (one distribution — not a workspace); new deps: fastapi, uvicorn,
   python-multipart.
 
-## 5. Phase gate (PLAN.md §12)
+## 5. Phase gate (PLAN.md §12) ✅
 
-- [ ] Browse operations <100 ms on a 50k-file index (automated perf test).
-- [ ] Uploads never block the UI (upload endpoint returns pre-I/O; worker
-  does provider traffic; asserted in API tests).
-- [ ] Health/tier badges reflect injected failures within one scrub cycle
-  (chaos provider → scrub job → /api/health flips; asserted in API tests).
-- [ ] Full suite green, no regressions.
+- [x] Browse operations <100 ms on a 50k-file index
+  (test_listing_and_move.py::test_listing_50k_files_under_100ms).
+- [x] Uploads never block the UI
+  (test_daemon.py::test_upload_returns_before_provider_io — <0.9 s against
+  1 s-latency providers).
+- [x] Health/tier badges reflect injected failures within one scrub cycle
+  (test_daemon.py::test_health_flips_within_one_scrub_cycle).
+- [x] Full suite green, no regressions (145 passed); `npm run build` clean
+  under strict TS.
 
 ## Constraints
 
