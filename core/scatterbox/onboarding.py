@@ -19,12 +19,20 @@ from pathlib import Path
 
 from scatterbox import oauth
 from scatterbox.errors import ScatterboxError
-from scatterbox.providers import Quota, create_provider, gdrive, onedrive
+from scatterbox.providers import ADAPTERS, Quota, create_provider
 from scatterbox.register import Register
 from scatterbox.vault import Vault
 
-# OAuth endpoint/scope knowledge lives in the adapter modules.
-OAUTH_MODULES = {"gdrive": gdrive, "onedrive": onedrive}
+
+def oauth_types() -> dict[str, object]:
+    """type -> module with AUTH_URL/TOKEN_URL/SCOPES, from the adapter
+    registry — a newly registered OAuth backend onboards with zero changes
+    here."""
+    return {
+        type_: spec.oauth_module
+        for type_, spec in ADAPTERS.items()
+        if spec.oauth_module is not None
+    }
 
 
 def _ensure_name_free(register: Register, name: str) -> None:
@@ -78,10 +86,11 @@ def onboard_oauth_provider(
     Blocks until the user finishes (or abandons) the browser consent —
     callers in async contexts run this in a thread.
     """
-    if type_ not in OAUTH_MODULES:
+    modules = oauth_types()
+    if type_ not in modules:
         raise ScatterboxError(f"unknown OAuth provider type {type_!r}")
     _ensure_name_free(register, name)
-    mod = OAUTH_MODULES[type_]
+    mod = modules[type_]
     blob = oauth.run_loopback_flow(
         auth_url=mod.AUTH_URL,
         token_url=mod.TOKEN_URL,

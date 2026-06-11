@@ -28,9 +28,10 @@ from starlette.background import BackgroundTask
 import io
 import zipfile
 
-from scatterbox import onboarding, pipeline, portability, vault
+from scatterbox import ec, onboarding, pipeline, portability, vault
 from scatterbox.errors import ScatterboxError, VPathNotFoundError, WrongPassphraseError
-from scatterbox.providers import create_provider
+from scatterbox.placement import Policy, merge_policy, policy_from_dict, policy_to_dict
+from scatterbox.providers import create_provider, known_types
 from scatterbox.register import Register, derive_health
 from scatterbox_daemon.state import DaemonState
 from scatterbox_daemon.worker import cleanup_stale_spool, run_snapshotter, run_worker
@@ -277,7 +278,9 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             "chunk_size": rec["chunk_size"],
             "replica_target": rec["replica_target"],
             "min_spread": rec["min_spread"],
-            "health": derive_health(min_live, rec["replica_target"]),
+            "scheme": rec["scheme"],
+            "ec_k": rec["ec_k"],
+            "health": derive_health(min_live, rec["replica_target"], ec_k=rec["ec_k"]),
             "min_live": min_live,
             "providers": list(providers.values()),
         }
@@ -294,11 +297,87 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 continue
             min_live = state.register.min_live_replicas(rec["manifest_id"])
             out[path] = {
-                "health": derive_health(min_live, rec["replica_target"]),
+                "health": derive_health(min_live, rec["replica_target"], ec_k=rec["ec_k"]),
                 "min_live": min_live,
                 "replica_target": rec["replica_target"],
+                "scheme": rec["scheme"],
             }
         return out
+
+    # -- folder policies (Phase 5, PLAN.md §7) ----------------------------------
+
+    def _policy_json(policy: Policy) -> dict:
+        """Full (not sparse) view for the UI."""
+        return {
+            "replicas": policy.replicas,
+            "min_spread": policy.min_spread,
+            "spread_mode": policy.spread_mode,
+            "spread_cap": policy.spread_cap,
+            "scheme": policy.scheme,
+            "ec_k": policy.ec_k,
+            "ec_n": policy.ec_n,
+            "pinned": sorted(policy.pinned),
+            "excluded": sorted(policy.excluded),
+        }
+
+    @app.get("/api/policies")
+    async def policies(request: Request):
+        return [
+            {"path": folder, "policy": data}
+            for folder, data in _state(request).register.list_folder_policies()
+        ]
+
+    @app.get("/api/policy")
+    async def policy_effective(request: Request, path: str = "/"):
+        """The policy governing a path, where it came from, and whether the
+        path itself has an explicit one (for the editor)."""
+        state = _state(request)
+        vpath = pipeline.normalize_vpath(path)
+        found = state.register.folder_policy_for(vpath)
+        own = dict(state.register.list_folder_policies()).get(vpath)
+        return {
+            "path": vpath,
+            "effective": _policy_json(
+                policy_from_dict(found[1]) if found else Policy()
+            ),
+            "source": found[0] if found else None,
+            "explicit": own,
+        }
+
+    @app.put("/api/policy")
+    async def policy_set(request: Request, body: dict):
+        state = _state(request)
+        try:
+            vpath = pipeline.normalize_vpath(body.get("path", "/"))
+            policy = merge_policy(
+                Policy(),
+                replicas=body.get("replicas"),
+                min_spread=body.get("min_spread"),
+                spread_mode=body.get("spread_mode"),
+                spread_cap=body.get("spread_cap"),
+                scheme=body.get("scheme"),
+                ec_k=body.get("ec_k"),
+                ec_n=body.get("ec_n"),
+                pinned=frozenset(body["pinned"]) if body.get("pinned") else None,
+                excluded=frozenset(body["excluded"]) if body.get("excluded") else None,
+            )
+            if policy.scheme == "ec":
+                ec.validate_params(policy.ec_k, policy.ec_n)
+            if policy.min_spread > 1:
+                policy.resolved_spread_cap()
+            state.register.set_folder_policy(vpath, policy_to_dict(policy))
+        except ScatterboxError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        state.dirty.set()
+        return {"path": vpath, "policy": policy_to_dict(policy)}
+
+    @app.delete("/api/policy")
+    async def policy_unset(request: Request, path: str):
+        state = _state(request)
+        if not state.register.delete_folder_policy(pipeline.normalize_vpath(path)):
+            raise HTTPException(status_code=404, detail=f"no policy set on {path}")
+        state.dirty.set()
+        return {"removed": path}
 
     @app.post("/api/move")
     async def move(request: Request, body: dict):
@@ -329,18 +408,25 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         request: Request,
         file: UploadFile,
         path: str = Form("/"),
-        replicas: int = Form(pipeline.DEFAULT_REPLICAS),
-        spread: int = Form(1),
-        spread_mode: str = Form("disjoint"),
+        replicas: int | None = Form(None),
+        spread: int | None = Form(None),
+        spread_mode: str | None = Form(None),
     ):
         """Spool the body to disk and enqueue — returns before any provider
-        sees a byte, which is the no-blocking-uploads gate."""
+        sees a byte, which is the no-blocking-uploads gate. Unset options
+        inherit from the folder policy (PLAN.md §7)."""
         state = _state(request)
         _require_unlocked(state)
         try:
             vpath = pipeline.normalize_vpath(path, basename=file.filename or "upload.bin")
             if state.register.get_file(vpath) is not None:
                 raise HTTPException(status_code=409, detail=f"{vpath} already exists")
+            policy = merge_policy(
+                pipeline.resolve_policy(state.register, vpath),
+                replicas=replicas,
+                min_spread=spread,
+                spread_mode=spread_mode,
+            )
         except ScatterboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         tmp = state.tmp_dir / f"upload-{uuid.uuid4().hex}"
@@ -352,9 +438,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             {
                 "tmp_path": str(tmp),
                 "vpath": vpath,
-                "replicas": replicas,
-                "spread": spread,
-                "spread_mode": spread_mode,
+                "policy": policy_to_dict(policy),
             },
         )
         state.wake.set()
@@ -459,7 +543,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 if not root:
                     raise HTTPException(status_code=400, detail="root directory required")
                 onboarding.add_localfs_provider(state.register, name, root=root, **limits)
-            elif type_ in onboarding.OAUTH_MODULES:
+            elif type_ in onboarding.oauth_types():
                 _require_unlocked(state)
                 client_id = (body.get("client_id") or "").strip()
                 if not client_id:
@@ -487,7 +571,7 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             else:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"unsupported provider type {type_!r} (localfs, gdrive, onedrive)",
+                    detail=f"unsupported provider type {type_!r} ({', '.join(known_types())})",
                 )
         except ScatterboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc))

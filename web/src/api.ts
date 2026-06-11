@@ -4,6 +4,7 @@ import type {
   Job,
   Listing,
   NewProvider,
+  PolicyInfo,
   ProviderInfo,
   Status,
 } from "./types";
@@ -57,17 +58,33 @@ export const api = {
       method: "DELETE",
     }),
 
-  upload: (file: File, path: string, opts: { replicas: number; spread: number }) => {
+  upload: (
+    file: File,
+    path: string,
+    opts: { replicas?: number; spread?: number } = {},
+  ) => {
     const form = new FormData();
     form.append("file", file);
     form.append("path", path.endsWith("/") ? path : path + "/");
-    form.append("replicas", String(opts.replicas));
-    form.append("spread", String(opts.spread));
+    // unset = inherit from the folder policy
+    if (opts.replicas !== undefined) form.append("replicas", String(opts.replicas));
+    if (opts.spread !== undefined) form.append("spread", String(opts.spread));
     return request<{ job_id: number; vpath: string }>("/api/upload", {
       method: "POST",
       body: form,
     });
   },
+
+  policy: (path: string) =>
+    request<PolicyInfo>(`/api/policy?path=${encodeURIComponent(path)}`),
+  setPolicy: (path: string, fields: Record<string, unknown>) =>
+    request("/api/policy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, ...fields }),
+    }),
+  clearPolicy: (path: string) =>
+    request(`/api/policy?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
   downloadUrl: (path: string) => `/api/download?path=${encodeURIComponent(path)}`,
 
   jobs: () => request<Job[]>("/api/jobs"),

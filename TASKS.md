@@ -1,70 +1,67 @@
-# TASKS.md — Phase 4: Portability + recovery
+# TASKS.md — Phase 5: Policies + erasure coding (+ adapter registry)
 
-**Status: ✅ complete (2026-06-11).** Both PLAN gates automated (157 tests)
-and exercised live: CLI export → web-wizard import restored a home
-byte-identically; auto-snapshot + vault-only recovery rebuilt a destroyed
-register. See PLAN.md §12 Phase 4 for deviations.
-(Phase 2's real-credential gates remain open, tracked in PLAN.md §12.)
+**Status: ✅ complete (2026-06-11).** EC chaos gate automated (test_ec.py),
+policies resolved identically across library/CLI/daemon/UI, registry +
+template in place; verified live in the browser (EC folder policy →
+optionless upload → ●●●●● "5/5 shares" → byte-identical download). 182+
+tests green. See PLAN.md §12 Phase 5 for deviations.
+Scope decision (user): NO exotic adapter implementations yet (Discord/
+YouTube/Mega/Pastebin…) — but ship the plug-in seams so they bolt on later.
+Phase 2's real-credential gates remain open (PLAN.md §12).
 
-Read `PLAN.md` first (§9 register+vault portability, §12 Phase 4). The
-register is the crown jewel; these tasks make it survivable: export/import
-for deliberate moves, automatic provider snapshots for disasters.
+## 1. Erasure coding `ec(k,n)` (PLAN.md §7) ✅
 
-## 1. Core portability (`core/scatterbox/portability.py`) ✅
+- `core/scatterbox/ec.py`: thin zfec wrapper — split (pad → k blocks → n
+  systematic shares), join (any k shares → original), regenerate (specific
+  missing share indices). Dependency `zfec` (named in PLAN.md §3).
+- Schema v6: `manifests.ec_k/ec_n`; `replicas.share_index/share_hash`
+  (NULL for plain replicas). For EC manifests `replica_target = n`, rows
+  are shares — health/floor queries keep working; `derive_health` learns
+  the k threshold (≥n healthy, k<s<n degraded, =k at-risk, <k lost).
+- Pipeline: per chunk, the encrypted object is split into n shares stored
+  on n distinct providers (object name `<chunk_hash>.<share_index>`); read
+  fetches any k verified shares (share_hash) and reconstructs, then checks
+  the chunk hash + GCM tag as usual. Scrub deep-verifies shares by
+  share_hash; repair fetches k shares, regenerates exactly the missing
+  indices, places them on providers holding no live share of the chunk.
+- `min_spread` is ignored for EC files (a share holder owns 1/k of nothing
+  decryptable — anti-colocation is built in).
 
-- **Snapshot format:** consistent register bytes via the SQLite backup API →
-  zstd → AES-256-GCM under the master key (`SBSNAP1` magic + nonce + ct,
-  AAD-bound). Plain (unencrypted) export also allowed per PLAN.md §9.
-- **export_archive:** register snapshot (encrypted or plain) + vault copy.
-- **import_archive:** validate the vault against the passphrase FIRST, then
-  accept either snapshot or raw SQLite register bytes, sanity-open the
-  result (migrations + file count) before finalizing. Refuses an
-  initialized home unless forced.
-- **snapshot_to_providers:** encrypt → upload to the ≥2 most reliable
-  providers → store the locations (provider type/config/ref) in the vault
-  under `register-snapshot`, then best-effort delete the previous
-  snapshot's objects. The vault is what makes recovery possible: it already
-  holds the credentials, now also where the snapshot lives.
-- **restore_register_from_snapshot:** vault + passphrase only → fetch from
-  any stored location → decrypt → validate → install.
+*Verify (phase gate):* EC chaos test — files at ec(3,5) across 5 providers,
+kill 2 (n−k) → every file restores byte-identical; with spare providers,
+scrub+repair regenerates the missing shares and health returns to healthy.
 
-*Verify (the two PLAN gates):* export on A, import into a clean home →
-byte-identical downloads; destroy register.db, restore from passphrase +
-provider snapshot → byte-identical downloads.
+## 2. Per-folder policies (PLAN.md §7/§11) ✅
 
-## 2. CLI ✅
+- Schema v6: `policies(vpath UNIQUE, policy JSON)` — folder → policy
+  (replicas, spread, scheme incl. ec(k,n), tiers, pin/exclude).
+- Resolution: deepest ancestor folder wins; explicit arguments override
+  per field. `put_file` with no policy resolves from the register.
+- CLI: `scatterbox policy set|show|list|unset`; put gains `--scheme`,
+  `--ec-k`, `--ec-n` overrides.
+- Daemon: GET /api/policies, GET/PUT/DELETE /api/policy (effective policy
+  + its source folder); upload form fields become optional → inherit.
+- UI: policy panel on the files toolbar for the current folder (shows the
+  effective policy and where it came from, set/clear); upload options
+  default to "inherit".
 
-`scatterbox export <dir> [--plain]`, `scatterbox import <register> <vault>
-[--force]`, `scatterbox snapshot`, `scatterbox restore --vault <file>`.
+*Verify:* resolution unit tests (nearest ancestor, overrides win); upload
+into a folder with an ec policy produces an EC manifest; CLI + API CRUD.
 
-## 3. Daemon + automatic safety net ✅
+## 3. Adapter registry (future Discord/YouTube/Mega/Pastebin…) ✅
 
-- `GET /api/export` (unlocked): one zip — vault.json + encrypted register
-  snapshot.
-- `POST /api/import` (uninitialized only): multipart; accepts the export
-  zip, or vault+register files, or vault alone (→ provider-snapshot
-  restore). Detects parts by content, not filename. Unlocks on success so
-  the wizard drops straight into the explorer. The daemon's open register
-  connection is closed around the file swap and reopened.
-- **Debounced auto-snapshot:** mutating jobs (upload/delete/scrub) and
-  move/rm mark the state dirty; a background task snapshots to providers
-  ~20 s after changes settle (skipped while locked), reported over /ws.
+- `providers/__init__.py` becomes a registry: `AdapterSpec(factory,
+  requires_secrets, oauth_module)` + `register_adapter()`; create_provider,
+  requires_secrets, and onboarding's OAuth-type list all read from it —
+  adding a backend touches exactly one new module + one register call.
+- `providers/_template.py`: a fully-commented skeleton adapter (the
+  Provider protocol, profile guidance with the PLAN.md §6 priors for
+  Discord/YouTube-class backends, transform-stage hook, onboarding notes).
 
-*Verify:* API tests — export zip round-trips through import on a fresh
-home; vault-only restore works; auto-snapshot fires after an upload
-(debounce shortened via monkeypatch).
+*Verify:* a test registers a toy adapter and round-trips through
+create_provider + the CLI/daemon type validation messages.
 
-## 4. Web UI ✅
+## 4. Wrap-up ✅
 
-- First-run screen becomes a choice: **set up new** (existing wizard) or
-  **import backup** (drop the export zip — or vault.json + register file,
-  or vault.json alone for provider-snapshot recovery — plus passphrase).
-- **export backup** button on the providers tab.
-
-*Verify:* `npm run build` clean; wizard choice + import path exercised
-against a live daemon.
-
-## 5. Wrap-up ✅
-
-PLAN.md §12 Phase 4 marked with deviations; README portability section;
-full suite green (157 passed) + web build clean.
+PLAN.md §12 Phase 5 marked (deviation: transform implementations deferred
+by user decision) + decision log #9; README; full suite + web build green.

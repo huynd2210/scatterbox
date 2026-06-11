@@ -116,6 +116,19 @@ a.remove { margin-left: 8px; }
 .cell.actions { width: 90px; display: flex; gap: 12px; justify-content: flex-end; }
 .cell.actions a.danger { color: var(--bad); }
 
+/* folder policy panel */
+.policy-panel {
+  margin: 0 16px 8px; padding: 12px 14px;
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: 8px; display: grid; gap: 10px;
+}
+.policy-head { display: flex; align-items: center; gap: 10px; }
+.policy-head .close { margin-left: auto; }
+.policy-panel label { color: var(--muted); font-size: 12px; }
+.policy-panel input, .policy-panel select { margin-left: 5px; }
+.policy-panel input { width: 56px; }
+.policy-panel .form-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+
 /* detail panel */
 .detail {
   position: absolute; right: 0; top: 0; bottom: 0; width: 340px;

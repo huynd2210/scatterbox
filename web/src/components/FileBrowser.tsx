@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, healthDots, humanBytes } from "../api";
 import type { FileDetail, FileEntry, Health, Listing } from "../types";
+import { PolicyPanel } from "./PolicyPanel";
 
 type Row =
   | { kind: "dir"; name: string }
@@ -14,8 +15,10 @@ export function FileBrowser({ refreshKey }: { refreshKey: number }) {
   const [detail, setDetail] = useState<FileDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [replicas, setReplicas] = useState(3);
-  const [spread, setSpread] = useState(1);
+  // empty string = inherit from the folder policy (PLAN.md §7)
+  const [replicas, setReplicas] = useState("");
+  const [spread, setSpread] = useState("");
+  const [showPolicy, setShowPolicy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -73,9 +76,12 @@ export function FileBrowser({ refreshKey }: { refreshKey: number }) {
 
   const upload = useCallback(
     (files: FileList | File[]) => {
+      const opts: { replicas?: number; spread?: number } = {};
+      if (replicas !== "") opts.replicas = Number(replicas);
+      if (spread !== "") opts.spread = Number(spread);
       for (const file of Array.from(files)) {
         api
-          .upload(file, path, { replicas, spread })
+          .upload(file, path, opts)
           .catch((e: Error) => setError(`upload ${file.name}: ${e.message}`));
       }
     },
@@ -111,26 +117,34 @@ export function FileBrowser({ refreshKey }: { refreshKey: number }) {
           })}
         </nav>
         <div className="upload-opts">
-          <label title="replica floor per chunk">
+          <label title="replica floor per chunk; empty = folder policy">
             replicas
             <input
               type="number"
               min={1}
               max={9}
+              placeholder="auto"
               value={replicas}
-              onChange={(e) => setReplicas(Number(e.target.value))}
+              onChange={(e) => setReplicas(e.target.value)}
             />
           </label>
-          <label title="anti-colocation: split across N provider shard groups">
+          <label title="anti-colocation shard groups; empty = folder policy">
             spread
             <input
               type="number"
               min={1}
               max={9}
+              placeholder="auto"
               value={spread}
-              onChange={(e) => setSpread(Number(e.target.value))}
+              onChange={(e) => setSpread(e.target.value)}
             />
           </label>
+          <button
+            onClick={() => setShowPolicy((s) => !s)}
+            title="placement policy for this folder"
+          >
+            policy
+          </button>
           <button onClick={() => fileInput.current?.click()}>upload</button>
           <input
             ref={fileInput}
@@ -145,6 +159,9 @@ export function FileBrowser({ refreshKey }: { refreshKey: number }) {
         </div>
       </div>
       {error && <p className="error">{error}</p>}
+      {showPolicy && (
+        <PolicyPanel path={path} onClose={() => setShowPolicy(false)} />
+      )}
 
       <div className="list" ref={scrollRef}>
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
@@ -232,7 +249,12 @@ function FileRow({
       </span>
       <span
         className={`cell health ${health?.health ?? ""}`}
-        title={health ? `${health.health} — weakest chunk ${health.min_live}/${health.replica_target} replicas` : ""}
+        title={
+          health
+            ? `${health.health} — weakest chunk ${health.min_live}/${health.replica_target} ` +
+              (health.scheme === "ec" ? "shares" : "replicas")
+            : ""
+        }
       >
         {health ? healthDots(health.min_live, health.replica_target) : "…"}
       </span>
@@ -275,6 +297,15 @@ function DetailPanel({
         </dd>
         <dt>chunk size</dt>
         <dd>{humanBytes(detail.chunk_size)}</dd>
+        {detail.scheme === "ec" && (
+          <>
+            <dt>scheme</dt>
+            <dd>
+              ec({detail.ec_k},{detail.replica_target}) — any {detail.ec_k} of{" "}
+              {detail.replica_target} shares rebuild it
+            </dd>
+          </>
+        )}
         {detail.min_spread > 1 && (
           <>
             <dt>spread</dt>

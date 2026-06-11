@@ -30,7 +30,7 @@ from blake3 import blake3
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from scatterbox import keys, placement
+from scatterbox import ec, keys, placement
 from scatterbox.errors import (
     ChunkUnavailableError,
     FileTooLargeError,
@@ -83,8 +83,16 @@ class PutResult:
     size: int
     chunk_count: int
     chunk_size: int
-    replicas: int
+    replicas: int  # replicas per chunk, or n shares for EC
     spread: int = 1  # disjoint provider groups the chunks are split across
+    scheme: str = "replica"  # replica | ec
+
+
+def resolve_policy(register: Register, vpath: str) -> Policy:
+    """The folder policy governing vpath (deepest ancestor wins), or the
+    defaults. Explicit arguments are merged on top by the caller."""
+    found = register.folder_policy_for(vpath)
+    return placement.policy_from_dict(found[1]) if found else Policy()
 
 
 def load_providers(
@@ -166,14 +174,15 @@ async def put_file(
     chunks. The except block below cleans up those orphans when the failure
     is one we get to see.
 
-    `replicas` is shorthand for Policy(replicas=...); pass one or the other.
+    With policy=None the folder policy for vpath applies (PLAN.md §7);
+    `replicas` is a per-call override on top of whichever policy won.
     """
-    if policy is None:
-        policy = Policy(replicas=replicas if replicas is not None else DEFAULT_REPLICAS)
-    elif replicas is not None:
-        raise ScatterboxError("pass either policy or replicas, not both")
     local_path = Path(local_path)
     vpath = normalize_vpath(vpath, basename=local_path.name)
+    if policy is None:
+        policy = placement.merge_policy(resolve_policy(register, vpath), replicas=replicas)
+    elif replicas is not None:
+        raise ScatterboxError("pass either policy or replicas, not both")
     if register.get_file(vpath) is not None:
         raise VPathExistsError(f"{vpath} already exists; rm it first")
 
@@ -184,26 +193,52 @@ async def put_file(
             "pass --force-large to store it anyway"
         )
 
-    # Pick the providers once for the whole file. Without spread there is a
-    # single group and every chunk goes to the same set; with min_spread > 1
-    # the groups are disjoint and chunks are dealt round-robin across them,
-    # so no provider ever assembles a complete (ciphertext) copy.
-    groups = await placement.select_spread_groups(
-        load_providers(register, secrets), policy, chunk_size + CHUNK_OVERHEAD
-    )
-    eff_chunk_size = _effective_chunk_size(
-        [t for group in groups for t in group], chunk_size
-    )
-    if policy.min_spread > 1 and size > 0:
-        if size < policy.min_spread:
-            raise ScatterboxError(
-                f"{local_path} is only {size} byte(s) — too small to split "
-                f"across {policy.min_spread} provider groups"
+    # Pick the providers once for the whole file.
+    handles = load_providers(register, secrets)
+    ec_targets: list[ProviderHandle] = []
+    groups: list[list[ProviderHandle]] = []
+    if policy.scheme == "ec":
+        # ec(k,n): every chunk becomes n shares on n distinct providers.
+        # The floor is exactly n — durability extras make no sense here
+        # (more redundancy = raise n), hence the slice.
+        ec.validate_params(policy.ec_k, policy.ec_n)
+        share_estimate = (chunk_size + CHUNK_OVERHEAD) // policy.ec_k + 64
+        ec_targets = (
+            await placement.select_targets(
+                handles,
+                Policy(
+                    replicas=policy.ec_n,
+                    allowed_tiers=policy.allowed_tiers,
+                    pinned=policy.pinned,
+                    excluded=policy.excluded,
+                ),
+                share_estimate,
             )
-        # A file must have at least min_spread chunks for the guarantee to
-        # mean anything (a single-chunk file would hand every replica holder
-        # the whole file) — shrink the chunk size if needed.
-        eff_chunk_size = min(eff_chunk_size, -(-size // policy.min_spread))
+        )[: policy.ec_n]
+        # Conservative: treat per-provider object caps as if a whole chunk
+        # had to fit, although only a 1/k share lands there.
+        eff_chunk_size = _effective_chunk_size(ec_targets, chunk_size)
+    else:
+        # Replication: one target set per spread group; without spread there
+        # is a single group and every chunk goes to the same set; with
+        # min_spread > 1 chunks are dealt round-robin across groups so no
+        # provider ever assembles a complete (ciphertext) copy.
+        groups = await placement.select_spread_groups(
+            handles, policy, chunk_size + CHUNK_OVERHEAD
+        )
+        eff_chunk_size = _effective_chunk_size(
+            [t for group in groups for t in group], chunk_size
+        )
+        if policy.min_spread > 1 and size > 0:
+            if size < policy.min_spread:
+                raise ScatterboxError(
+                    f"{local_path} is only {size} byte(s) — too small to split "
+                    f"across {policy.min_spread} provider groups"
+                )
+            # A file must have at least min_spread chunks for the guarantee to
+            # mean anything (a single-chunk file would hand every replica holder
+            # the whole file) — shrink the chunk size if needed.
+            eff_chunk_size = min(eff_chunk_size, -(-size // policy.min_spread))
 
     # Fresh random key for this file (see keys.py for why per-file keys).
     file_key = os.urandom(keys.KEY_LEN)
@@ -231,14 +266,35 @@ async def put_file(
                 nonce = os.urandom(keys.NONCE_LEN)
                 obj = nonce + aes.encrypt(nonce, payload, None)
                 chunk_hash = blake3(obj).hexdigest()
-                # Deal chunks round-robin across the spread groups (one group
-                # = today's behavior) and upload to that group concurrently.
-                group = seq % len(groups)
-                targets = groups[group]
-                refs = await asyncio.gather(
-                    *(t.instance.put(chunk_hash, obj) for t in targets)
-                )
-                uploaded.extend(zip((t.instance for t in targets), refs))
+                if policy.scheme == "ec":
+                    # n shares to n providers, share i to target i; object
+                    # names carry the index so a share is identifiable on
+                    # the provider even without the register.
+                    shares = ec.split(obj, policy.ec_k, policy.ec_n)
+                    refs = await asyncio.gather(
+                        *(
+                            t.instance.put(f"{chunk_hash}.{i}", shares[i])
+                            for i, t in enumerate(ec_targets)
+                        )
+                    )
+                    uploaded.extend(zip((t.instance for t in ec_targets), refs))
+                    ref_rows = [
+                        (t.id, r.value, i, blake3(shares[i]).hexdigest())
+                        for i, (t, r) in enumerate(zip(ec_targets, refs))
+                    ]
+                    group = 0
+                else:
+                    # Deal chunks round-robin across the spread groups (one
+                    # group = default) and upload to that group concurrently.
+                    group = seq % len(groups)
+                    targets = groups[group]
+                    refs = await asyncio.gather(
+                        *(t.instance.put(chunk_hash, obj) for t in targets)
+                    )
+                    uploaded.extend(zip((t.instance for t in targets), refs))
+                    ref_rows = [
+                        (t.id, r.value, None, None) for t, r in zip(targets, refs)
+                    ]
                 chunk_rows.append(
                     (
                         seq,
@@ -247,7 +303,7 @@ async def put_file(
                         len(plain),
                         use_compressed,
                         group,
-                        [(t.id, r.value) for t, r in zip(targets, refs)],
+                        ref_rows,
                     )
                 )
                 total_plain += len(plain)
@@ -260,17 +316,22 @@ async def put_file(
         await _cleanup_uploads(uploaded)
         raise
 
+    is_ec = policy.scheme == "ec"
     file_id = register.insert_file_with_manifest(
         vpath=vpath,
         size=total_plain,
         mtime=os.path.getmtime(local_path),
-        scheme="replica",
+        scheme="ec" if is_ec else "replica",
         wrapped_file_key=keys.wrap_key(master_key, file_key),
         chunk_size=eff_chunk_size,
-        replica_target=policy.replicas,
+        # For EC the per-chunk floor is "all n shares present"; health and
+        # repair read k from the manifest for the death threshold.
+        replica_target=policy.ec_n if is_ec else policy.replicas,
         chunk_rows=chunk_rows,
-        min_spread=policy.min_spread,
-        spread_cap=policy.resolved_spread_cap(),
+        min_spread=1 if is_ec else policy.min_spread,
+        spread_cap=1 if is_ec else policy.resolved_spread_cap(),
+        ec_k=policy.ec_k if is_ec else None,
+        ec_n=policy.ec_n if is_ec else None,
     )
     return PutResult(
         file_id=file_id,
@@ -278,9 +339,79 @@ async def put_file(
         size=total_plain,
         chunk_count=len(chunk_rows),
         chunk_size=eff_chunk_size,
-        replicas=min(len(g) for g in groups),
-        spread=len(groups),
+        replicas=policy.ec_n if is_ec else min(len(g) for g in groups),
+        spread=1 if is_ec else len(groups),
+        scheme="ec" if is_ec else "replica",
     )
+
+
+async def _fetch_ec_chunk(
+    register: Register,
+    rec,
+    chunk,
+    instances: dict[int, Provider],
+    secrets: SecretStore | None,
+) -> bytes:
+    """EC read path for one chunk: collect any k verified shares
+    (healthiest replicas first, each checked against its share_hash),
+    reconstruct, and verify the chunk hash. Failed shares are marked
+    suspect and ding reliability, same as failed replicas."""
+    k, n = rec["ec_k"], rec["ec_n"]
+    shares: dict[int, bytes] = {}
+    for replica in register.get_replicas(chunk["id"]):
+        if len(shares) >= k:
+            break
+        if replica["state"] == "lost" or replica["share_index"] is None:
+            continue
+        if replica["share_index"] in shares:
+            continue
+        pid = replica["provider_id"]
+        if pid not in instances:
+            prow = register.get_provider(pid)
+            instances[pid] = create_provider(
+                prow["type"], json.loads(prow["config"]), secrets
+            )
+        prior = instances[pid].profile().reliability_prior
+        try:
+            data = await instances[pid].get(RemoteRef(replica["remote_ref"]))
+        except Exception:
+            register.set_replica_state(replica["id"], "suspect")
+            register.update_reliability(pid, False, prior=prior)
+            continue
+        if blake3(data).hexdigest() != replica["share_hash"]:
+            register.set_replica_state(replica["id"], "suspect")
+            register.update_reliability(pid, False, prior=prior)
+            continue
+        register.mark_replica_verified(replica["id"])
+        register.update_reliability(pid, True, prior=prior)
+        shares[replica["share_index"]] = data
+    if len(shares) < k:
+        raise ChunkUnavailableError(
+            f"chunk {chunk['seq']} of {rec['vpath']}: only {len(shares)} of "
+            f"the {k} shares needed for reconstruction are available"
+        )
+    obj = ec.join(shares, k, n, chunk["stored_size"])
+    if blake3(obj).hexdigest() != chunk["chunk_hash"]:
+        # all shares hashed clean individually, so this would mean wrong
+        # parameters or a register/share mismatch — never silent corruption
+        raise ChunkUnavailableError(
+            f"chunk {chunk['seq']} of {rec['vpath']}: reconstruction failed verification"
+        )
+    return obj
+
+
+def _decode_chunk(aes: AESGCM, decompressor, chunk, obj: bytes) -> bytes:
+    """Decrypt + decompress + size-check one verified stored object."""
+    try:
+        payload = aes.decrypt(obj[: keys.NONCE_LEN], obj[keys.NONCE_LEN :], None)
+    except InvalidTag as exc:
+        raise ChunkUnavailableError(
+            f"chunk {chunk['seq']}: decryption failed (wrong key or corrupt data)"
+        ) from exc
+    plain = decompressor.decompress(payload) if chunk["compressed"] else payload
+    if len(plain) != chunk["plain_size"]:
+        raise ChunkUnavailableError(f"chunk {chunk['seq']}: size mismatch after decode")
+    return plain
 
 
 async def get_file(
@@ -311,12 +442,19 @@ async def get_file(
     decompressor = zstandard.ZstdDecompressor()
     instances: dict[int, Provider] = {}  # provider adapters, created lazily
 
+    is_ec = rec["scheme"] == "ec"
     local_path = Path(local_path)
     tmp = local_path.with_name(local_path.name + ".part")
     written = 0
     try:
         with open(tmp, "wb") as out:
             for chunk in register.get_chunks(rec["manifest_id"]):
+                if is_ec:
+                    obj = await _fetch_ec_chunk(register, rec, chunk, instances, secrets)
+                    plain = _decode_chunk(aes, decompressor, chunk, obj)
+                    out.write(plain)
+                    written += len(plain)
+                    continue
                 plain = None
                 for replica in register.get_replicas(chunk["id"]):
                     if replica["state"] == "lost":
@@ -408,10 +546,12 @@ class FileStatus:
     vpath: str
     size: int
     health: str  # healthy | degraded | at-risk | lost
-    min_live: int  # stored replicas of the weakest chunk
-    replica_target: int
+    min_live: int  # stored replicas/shares of the weakest chunk
+    replica_target: int  # replica floor, or n for EC
     chunk_count: int
     replica_states: dict[str, int]  # state -> count over all replicas
+    scheme: str = "replica"  # replica | ec
+    ec_k: int | None = None
 
 
 def file_status(register: Register, vpath: str) -> FileStatus:
@@ -424,11 +564,13 @@ def file_status(register: Register, vpath: str) -> FileStatus:
     return FileStatus(
         vpath=vpath,
         size=rec["size"],
-        health=derive_health(min_live, rec["replica_target"]),
+        health=derive_health(min_live, rec["replica_target"], ec_k=rec["ec_k"]),
         min_live=min_live,
         replica_target=rec["replica_target"],
         chunk_count=len(register.get_chunks(rec["manifest_id"])),
         replica_states=register.replica_state_counts(rec["manifest_id"]),
+        scheme=rec["scheme"],
+        ec_k=rec["ec_k"],
     )
 
 

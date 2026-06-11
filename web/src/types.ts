@@ -17,6 +17,26 @@ export interface Health {
   health: "healthy" | "degraded" | "at-risk" | "lost" | string;
   min_live: number;
   replica_target: number;
+  scheme?: "replica" | "ec" | string;
+}
+
+export interface PolicyValues {
+  replicas: number;
+  min_spread: number;
+  spread_mode: string;
+  spread_cap: number | null;
+  scheme: "replica" | "ec" | string;
+  ec_k: number;
+  ec_n: number;
+  pinned: string[];
+  excluded: string[];
+}
+
+export interface PolicyInfo {
+  path: string;
+  effective: PolicyValues;
+  source: string | null; // folder it came from; null = defaults
+  explicit: Record<string, unknown> | null; // set on this exact folder?
 }
 
 export interface Job {
@@ -70,6 +90,8 @@ export interface FileDetail {
   chunk_size: number;
   replica_target: number;
   min_spread: number;
+  scheme: "replica" | "ec" | string;
+  ec_k: number | null;
   health: string;
   min_live: number;
   providers: ProviderBreakdown[];

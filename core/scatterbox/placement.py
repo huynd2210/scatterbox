@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from scatterbox.errors import NotEnoughProvidersError, ScatterboxError
 
@@ -62,6 +62,13 @@ class Policy:
     min_spread: int = 1
     spread_mode: str = "disjoint"
     spread_cap: int | None = None
+    # Storage scheme (PLAN.md §7): plain replication or erasure coding.
+    # With "ec", each chunk becomes ec_n shares of which any ec_k rebuild
+    # it; replicas/min_spread are ignored (n distinct providers, and a
+    # share holder owns 1/k of undecryptable ciphertext anyway).
+    scheme: str = "replica"  # replica | ec
+    ec_k: int = 3
+    ec_n: int = 5
 
     def resolved_spread_cap(self) -> int:
         """The effective max number of shard groups per provider (K)."""
@@ -81,6 +88,49 @@ class Policy:
                 f"{self.min_spread} groups would hold the whole file"
             )
         return cap
+
+
+def policy_to_dict(policy: Policy) -> dict:
+    """JSON-ready form for the register's policies table — only fields
+    that differ from the defaults, so stored policies stay readable and
+    future defaults apply to old rows."""
+    default = Policy()
+    out: dict = {}
+    for field_name in (
+        "replicas", "min_spread", "spread_mode", "spread_cap",
+        "scheme", "ec_k", "ec_n",
+    ):
+        value = getattr(policy, field_name)
+        if value != getattr(default, field_name):
+            out[field_name] = value
+    if policy.allowed_tiers is not None:
+        out["allowed_tiers"] = sorted(policy.allowed_tiers)
+    if policy.pinned:
+        out["pinned"] = sorted(policy.pinned)
+    if policy.excluded:
+        out["excluded"] = sorted(policy.excluded)
+    return out
+
+
+def policy_from_dict(data: dict) -> Policy:
+    kwargs: dict = {k: v for k, v in data.items() if k in (
+        "replicas", "min_spread", "spread_mode", "spread_cap",
+        "scheme", "ec_k", "ec_n",
+    )}
+    if data.get("allowed_tiers") is not None:
+        kwargs["allowed_tiers"] = frozenset(data["allowed_tiers"])
+    if data.get("pinned"):
+        kwargs["pinned"] = frozenset(data["pinned"])
+    if data.get("excluded"):
+        kwargs["excluded"] = frozenset(data["excluded"])
+    return Policy(**kwargs)
+
+
+def merge_policy(base: Policy, **overrides) -> Policy:
+    """base with every non-None override applied — how explicit CLI flags /
+    upload-form fields beat the folder policy field by field."""
+    changes = {k: v for k, v in overrides.items() if v is not None}
+    return replace(base, **changes) if changes else base
 
 
 @dataclass

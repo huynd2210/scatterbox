@@ -21,10 +21,10 @@ from typing import Annotated, NoReturn, Optional
 
 import typer
 
-from scatterbox import onboarding, pipeline, portability, scrubber, vault
+from scatterbox import ec, onboarding, pipeline, portability, scrubber, vault
 from scatterbox.errors import ScatterboxError
-from scatterbox.placement import Policy
-from scatterbox.providers import create_provider, requires_secrets
+from scatterbox.placement import Policy, merge_policy, policy_from_dict, policy_to_dict
+from scatterbox.providers import create_provider, known_types, requires_secrets
 from scatterbox.register import Register
 
 app = typer.Typer(
@@ -32,9 +32,11 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_show_locals=False,  # never dump locals — may hold keys
 )
-# Sub-app gives the nested command style: `scatterbox provider add ...`
+# Sub-apps give the nested command style: `scatterbox provider add ...`
 provider_app = typer.Typer(help="Manage storage providers.", no_args_is_help=True)
 app.add_typer(provider_app, name="provider")
+policy_app = typer.Typer(help="Per-folder placement policies (PLAN.md §7).", no_args_is_help=True)
+app.add_typer(policy_app, name="policy")
 
 
 def _home() -> Path:
@@ -110,24 +112,36 @@ def put(
         Path, typer.Argument(exists=True, dir_okay=False, readable=True)
     ],
     vpath: Annotated[str, typer.Argument(help="Target virtual path; trailing / means directory.")],
-    replicas: Annotated[int, typer.Option(min=1, help="Replica floor across distinct providers.")] = pipeline.DEFAULT_REPLICAS,
-    spread: Annotated[int, typer.Option(min=1, help="Split chunks across N provider shard groups so no single provider ever holds the whole file.")] = 1,
-    spread_mode: Annotated[str, typer.Option(help="disjoint: a provider holds at most 1 group (max 1/N of the file, needs ~N x replicas providers); packed: up to N-1 groups (cheapest, needs ~ceil(N x replicas/(N-1)) providers).")] = "disjoint",
+    replicas: Annotated[Optional[int], typer.Option(min=1, help="Replica floor across distinct providers (default: folder policy, else 3).")] = None,
+    spread: Annotated[Optional[int], typer.Option(min=1, help="Split chunks across N provider shard groups so no single provider ever holds the whole file.")] = None,
+    spread_mode: Annotated[Optional[str], typer.Option(help="disjoint: a provider holds at most 1 group (max 1/N of the file, needs ~N x replicas providers); packed: up to N-1 groups (cheapest, needs ~ceil(N x replicas/(N-1)) providers).")] = None,
     spread_cap: Annotated[Optional[int], typer.Option(min=1, help="Explicit max shard groups per provider (1..N-1); overrides --spread-mode.")] = None,
+    scheme: Annotated[Optional[str], typer.Option(help="replica | ec (erasure coding: chunks become n shares, any k rebuild).")] = None,
+    ec_k: Annotated[Optional[int], typer.Option(min=1, help="EC data shares k.")] = None,
+    ec_n: Annotated[Optional[int], typer.Option(min=2, help="EC total shares n.")] = None,
     pin: Annotated[Optional[list[str]], typer.Option(help="Provider name to always include (repeatable).")] = None,
     exclude: Annotated[Optional[list[str]], typer.Option(help="Provider name to never use (repeatable).")] = None,
     force_large: Annotated[bool, typer.Option("--force-large", help="Lift the 10 GB soft cap.")] = False,
 ) -> None:
-    """Store a local file at a virtual path."""
+    """Store a local file at a virtual path.
+
+    Unspecified options inherit from the deepest folder policy covering the
+    target path ('scatterbox policy set'); explicit flags win field by field.
+    """
     register = _open_register()
     v = _unlock()
-    policy = Policy(
+    target = pipeline.normalize_vpath(vpath, basename=local.name)
+    policy = merge_policy(
+        pipeline.resolve_policy(register, target),
         replicas=replicas,
-        pinned=frozenset(pin or ()),
-        excluded=frozenset(exclude or ()),
         min_spread=spread,
         spread_mode=spread_mode,
         spread_cap=spread_cap,
+        scheme=scheme,
+        ec_k=ec_k,
+        ec_n=ec_n,
+        pinned=frozenset(pin) if pin else None,
+        excluded=frozenset(exclude) if exclude else None,
     )
     try:
         result = asyncio.run(
@@ -145,9 +159,14 @@ def put(
         _fail(str(exc))
     finally:
         register.close()
+    stored_as = (
+        f"ec({policy.ec_k},{policy.ec_n}) shares"
+        if result.scheme == "ec"
+        else f"{result.replicas} replicas"
+    )
     typer.echo(
         f"stored {result.vpath} ({_human(result.size)}, "
-        f"{result.chunk_count} chunk(s) x {result.replicas} replicas"
+        f"{result.chunk_count} chunk(s) x {stored_as}"
         + (
             f", split across {result.spread} provider shard groups"
             if result.spread > 1
@@ -205,9 +224,10 @@ def status(vpath: Annotated[str, typer.Argument()]) -> None:
         st.replica_target - st.min_live, 0
     )
     states = ", ".join(f"{n} {state}" for state, n in sorted(st.replica_states.items()))
+    unit = f"ec({st.ec_k},{st.replica_target}) shares" if st.scheme == "ec" else "replicas"
     typer.echo(
         f"{st.vpath}  {dots} {st.health}  "
-        f"weakest chunk {st.min_live}/{st.replica_target} replicas stored  "
+        f"weakest chunk {st.min_live}/{st.replica_target} {unit} stored  "
         f"({st.chunk_count} chunk(s); replicas: {states})"
     )
 
@@ -328,7 +348,7 @@ def provider_add(
                 capacity_bytes=capacity_bytes,
             )
             typer.echo(f"added provider {name} (localfs at {root})")
-        elif type_ in onboarding.OAUTH_MODULES:
+        elif type_ in onboarding.oauth_types():
             # Fail on a duplicate name before any OAuth dance.
             try:
                 register.get_provider_by_name(name)
@@ -341,7 +361,7 @@ def provider_add(
                 max_object_bytes, capacity_bytes,
             )
         else:
-            _fail(f"unsupported provider type {type_!r} (localfs, gdrive, onedrive)")
+            _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
     except ScatterboxError as exc:
         _fail(str(exc))
     finally:
@@ -402,6 +422,111 @@ def provider_set(
     finally:
         register.close()
     typer.echo(f"updated provider {name}")
+
+
+def _policy_words(policy: Policy) -> str:
+    parts = []
+    if policy.scheme == "ec":
+        parts.append(f"ec({policy.ec_k},{policy.ec_n})")
+    else:
+        parts.append(f"{policy.replicas} replicas")
+        if policy.min_spread > 1:
+            cap = policy.resolved_spread_cap()
+            parts.append(f"spread {policy.min_spread} (cap {cap})")
+    if policy.pinned:
+        parts.append(f"pin {','.join(sorted(policy.pinned))}")
+    if policy.excluded:
+        parts.append(f"exclude {','.join(sorted(policy.excluded))}")
+    return ", ".join(parts)
+
+
+@policy_app.command("set")
+def policy_set(
+    folder: Annotated[str, typer.Argument(help="Folder path ('/' = global default).")],
+    replicas: Annotated[Optional[int], typer.Option(min=1)] = None,
+    spread: Annotated[Optional[int], typer.Option(min=1)] = None,
+    spread_mode: Annotated[Optional[str], typer.Option()] = None,
+    spread_cap: Annotated[Optional[int], typer.Option(min=1)] = None,
+    scheme: Annotated[Optional[str], typer.Option(help="replica | ec")] = None,
+    ec_k: Annotated[Optional[int], typer.Option(min=1)] = None,
+    ec_n: Annotated[Optional[int], typer.Option(min=2)] = None,
+    pin: Annotated[Optional[list[str]], typer.Option()] = None,
+    exclude: Annotated[Optional[list[str]], typer.Option()] = None,
+) -> None:
+    """Attach a placement policy to a folder; files stored under it inherit
+    these settings (deepest folder wins, explicit put flags beat both)."""
+    register = _open_register()
+    try:
+        vpath = pipeline.normalize_vpath(folder)
+        policy = merge_policy(
+            Policy(),
+            replicas=replicas,
+            min_spread=spread,
+            spread_mode=spread_mode,
+            spread_cap=spread_cap,
+            scheme=scheme,
+            ec_k=ec_k,
+            ec_n=ec_n,
+            pinned=frozenset(pin) if pin else None,
+            excluded=frozenset(exclude) if exclude else None,
+        )
+        if policy == Policy():
+            _fail("nothing to set: pass at least one policy option")
+        if policy.scheme == "ec":
+            ec.validate_params(policy.ec_k, policy.ec_n)
+        if policy.min_spread > 1:
+            policy.resolved_spread_cap()  # validates mode/cap combination
+        register.set_folder_policy(vpath, policy_to_dict(policy))
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    typer.echo(f"policy for {vpath}: {_policy_words(policy)}")
+
+
+@policy_app.command("show")
+def policy_show(path: Annotated[str, typer.Argument()] = "/") -> None:
+    """Show the effective policy for a path and where it comes from."""
+    register = _open_register()
+    try:
+        vpath = pipeline.normalize_vpath(path)
+        found = register.folder_policy_for(vpath)
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    if found is None:
+        typer.echo(f"{vpath}: defaults ({_policy_words(Policy())})")
+    else:
+        folder, data = found
+        typer.echo(f"{vpath}: {_policy_words(policy_from_dict(data))}  (from {folder})")
+
+
+@policy_app.command("list")
+def policy_list() -> None:
+    """List every folder policy."""
+    register = _open_register()
+    try:
+        rows = register.list_folder_policies()
+    finally:
+        register.close()
+    if not rows:
+        typer.echo("no folder policies; defaults apply everywhere")
+    for folder, data in rows:
+        typer.echo(f"{folder}  {_policy_words(policy_from_dict(data))}")
+
+
+@policy_app.command("unset")
+def policy_unset(folder: Annotated[str, typer.Argument()]) -> None:
+    """Remove a folder's policy (its subtree falls back to the parent's)."""
+    register = _open_register()
+    try:
+        removed = register.delete_folder_policy(pipeline.normalize_vpath(folder))
+    finally:
+        register.close()
+    if not removed:
+        _fail(f"no policy set on {folder}")
+    typer.echo(f"removed policy on {folder}")
 
 
 @app.command()

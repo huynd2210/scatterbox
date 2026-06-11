@@ -118,6 +118,23 @@ _MIGRATIONS = [
     """
     ALTER TABLE jobs ADD COLUMN result TEXT;
     """,
+    # v6 — Phase 5: erasure coding + per-folder policies.
+    # ec_k/ec_n: ec(k,n) parameters (NULL = plain replication). For EC
+    # manifests replica_target = n and each replicas row is one SHARE:
+    # share_index says which, share_hash lets the scrubber verify it
+    # without reconstructing the chunk. policies: folder vpath -> policy
+    # JSON, resolved nearest-ancestor-first at put time (PLAN.md §7).
+    """
+    ALTER TABLE manifests ADD COLUMN ec_k INTEGER;
+    ALTER TABLE manifests ADD COLUMN ec_n INTEGER;
+    ALTER TABLE replicas ADD COLUMN share_index INTEGER;
+    ALTER TABLE replicas ADD COLUMN share_hash TEXT;
+
+    CREATE TABLE policies (
+        vpath  TEXT NOT NULL UNIQUE,   -- folder ('/' = global default)
+        policy TEXT NOT NULL           -- JSON, see placement.policy_to_dict
+    );
+    """,
 ]
 
 # Replica lifecycle (TASKS.md §3). Same-state transitions are idempotent no-ops;
@@ -254,6 +271,40 @@ class Register:
             )
         return score
 
+    # -- folder policies (Phase 5, PLAN.md §7) --------------------------------
+
+    def set_folder_policy(self, vpath: str, policy: dict) -> None:
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO policies (vpath, policy) VALUES (?, ?)
+                   ON CONFLICT(vpath) DO UPDATE SET policy = excluded.policy""",
+                (vpath, json.dumps(policy)),
+            )
+
+    def delete_folder_policy(self, vpath: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM policies WHERE vpath = ?", (vpath,))
+        return cur.rowcount > 0
+
+    def list_folder_policies(self) -> list[tuple[str, dict]]:
+        return [
+            (row["vpath"], json.loads(row["policy"]))
+            for row in self.conn.execute("SELECT * FROM policies ORDER BY vpath")
+        ]
+
+    def folder_policy_for(self, vpath: str) -> tuple[str, dict] | None:
+        """The policy governing a file path: its deepest ancestor folder
+        with a policy set ('/' acts as the global default). Returns
+        (folder, policy) or None. Policy rows are few — a Python scan
+        beats SQL prefix gymnastics here."""
+        best: tuple[str, dict] | None = None
+        for folder, policy in self.list_folder_policies():
+            prefix = "/" if folder == "/" else folder + "/"
+            if vpath == folder or vpath.startswith(prefix):
+                if best is None or len(folder) > len(best[0]):
+                    best = (folder, policy)
+        return best
+
     # -- files / manifests ---------------------------------------------------
 
     def get_file(self, vpath: str) -> sqlite3.Row | None:
@@ -268,7 +319,8 @@ class Register:
             """
             SELECT f.id AS file_id, f.vpath, f.size, f.mtime,
                    m.id AS manifest_id, m.scheme, m.wrapped_file_key,
-                   m.chunk_size, m.replica_target, m.min_spread
+                   m.chunk_size, m.replica_target, m.min_spread,
+                   m.ec_k, m.ec_n
             FROM files f JOIN manifests m ON m.file_id = f.id
             WHERE f.vpath = ?
             """,
@@ -360,14 +412,19 @@ class Register:
         wrapped_file_key: bytes,
         chunk_size: int,
         replica_target: int,
-        chunk_rows: list[tuple[int, str, int, int, bool, int, list[tuple[int, str]]]],
+        chunk_rows: list[
+            tuple[int, str, int, int, bool, int, list[tuple[int, str, int | None, str | None]]]
+        ],
         min_spread: int = 1,
         spread_cap: int = 1,
+        ec_k: int | None = None,
+        ec_n: int | None = None,
     ) -> int:
         """Record a fully-uploaded file: file + manifest + chunks + replicas.
 
         chunk_rows: (seq, chunk_hash, stored_size, plain_size, compressed,
-        spread_group, [(provider_id, remote_ref), ...]). Runs as ONE
+        spread_group, [(provider_id, remote_ref, share_index, share_hash),
+        ...]) — share fields are None for plain replicas. Runs as ONE
         transaction — either the whole file becomes visible in the register
         or none of it does; a crash mid-insert can never leave a
         half-recorded file.
@@ -381,10 +438,10 @@ class Register:
             cur = self.conn.execute(
                 """INSERT INTO manifests
                    (file_id, scheme, wrapped_file_key, chunk_size, replica_target,
-                    min_spread, spread_cap)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    min_spread, spread_cap, ec_k, ec_n)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (file_id, scheme, wrapped_file_key, chunk_size, replica_target,
-                 min_spread, spread_cap),
+                 min_spread, spread_cap, ec_k, ec_n),
             )
             manifest_id = cur.lastrowid
             for seq, chunk_hash, stored_size, plain_size, compressed, group, refs in chunk_rows:
@@ -395,25 +452,36 @@ class Register:
                     (manifest_id, seq, chunk_hash, stored_size, plain_size, int(compressed), group),
                 )
                 chunk_row_id = cur.lastrowid
-                for provider_id, remote_ref in refs:
+                for provider_id, remote_ref, share_index, share_hash in refs:
                     # uploads happen before this insert, so replicas are
                     # born 'stored', not 'pending'
                     self.conn.execute(
-                        """INSERT INTO replicas (chunk_id, provider_id, remote_ref, state)
-                           VALUES (?, ?, ?, 'stored')""",
-                        (chunk_row_id, provider_id, remote_ref),
+                        """INSERT INTO replicas
+                           (chunk_id, provider_id, remote_ref, state, share_index, share_hash)
+                           VALUES (?, ?, ?, 'stored', ?, ?)""",
+                        (chunk_row_id, provider_id, remote_ref, share_index, share_hash),
                     )
         return file_id
 
     def add_replica(
-        self, chunk_row_id: int, provider_id: int, remote_ref: str, state: str = "stored"
+        self,
+        chunk_row_id: int,
+        provider_id: int,
+        remote_ref: str,
+        state: str = "stored",
+        share_index: int | None = None,
+        share_hash: str | None = None,
     ) -> int:
-        """Record one new copy of a chunk (used by repair after re-uploading)."""
+        """Record one new copy of a chunk — or one EC share — (used by
+        repair after re-uploading)."""
         with self.conn:
             cur = self.conn.execute(
-                """INSERT INTO replicas (chunk_id, provider_id, remote_ref, state, last_verified)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (chunk_row_id, provider_id, remote_ref, state, time.time()),
+                """INSERT INTO replicas
+                   (chunk_id, provider_id, remote_ref, state, last_verified,
+                    share_index, share_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (chunk_row_id, provider_id, remote_ref, state, time.time(),
+                 share_index, share_hash),
             )
         return cur.lastrowid
 
@@ -511,10 +579,12 @@ class Register:
         ).fetchone()
         return row["min_live"] if row["min_live"] is not None else 0
 
-    def file_health(self, manifest_id: int, replica_target: int) -> str:
+    def file_health(
+        self, manifest_id: int, replica_target: int, ec_k: int | None = None
+    ) -> str:
         """healthy / degraded / at-risk / lost, from the weakest chunk
         (PLAN.md §8 dots)."""
-        return derive_health(self.min_live_replicas(manifest_id), replica_target)
+        return derive_health(self.min_live_replicas(manifest_id), replica_target, ec_k=ec_k)
 
     def count_files(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
@@ -589,6 +659,7 @@ class Register:
             """
             SELECT c.id AS chunk_row_id, c.seq, c.chunk_hash, c.stored_size,
                    c.manifest_id, c.spread_group, m.min_spread, m.spread_cap,
+                   m.scheme, m.ec_k, m.ec_n,
                    m.replica_target, f.vpath,
                    SUM(CASE WHEN r.state = 'stored' THEN 1 ELSE 0 END) AS live
             FROM chunks c
@@ -712,14 +783,22 @@ class Register:
         return {row["state"]: row["n"] for row in rows}
 
 
-def derive_health(min_live: int, replica_target: int) -> str:
-    """Weakest-chunk replica count -> the health word shown to the user.
+def derive_health(min_live: int, replica_target: int, *, ec_k: int | None = None) -> str:
+    """Weakest-chunk replica/share count -> the health word shown to the user.
 
-    With the default floor of 3 this maps to PLAN.md §8's dots:
-    3+ -> healthy (●●●), 2 -> degraded (●●○), 1 -> at-risk (●○○), 0 -> lost.
+    Replication (default floor 3, PLAN.md §8's dots): 3+ -> healthy (●●●),
+    2 -> degraded (●●○), 1 -> at-risk (●○○), 0 -> lost.
+
+    Erasure coding ec(k,n): replica_target is n and the file dies below k
+    shares — n -> healthy, k<s<n -> degraded, =k -> at-risk (one more loss
+    is fatal), <k -> lost.
     """
     if min_live >= replica_target:
         return "healthy"
+    if ec_k is not None:
+        if min_live < ec_k:
+            return "lost"
+        return "at-risk" if min_live == ec_k else "degraded"
     if min_live == 0:
         return "lost"
     if min_live == 1:

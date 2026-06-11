@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 
 from blake3 import blake3
 
-from scatterbox import placement
-from scatterbox.errors import NotEnoughProvidersError
+from scatterbox import ec, placement
+from scatterbox.errors import NotEnoughProvidersError, ScatterboxError
 from scatterbox.pipeline import ProviderHandle, load_providers
 from scatterbox.placement import Policy
 from scatterbox.providers import RemoteRef
@@ -82,14 +82,18 @@ async def _probe(register: Register, handle: ProviderHandle, replica, report) ->
 
 
 async def _deep_verify(register: Register, handle, replica, report) -> None:
-    """Expensive check: download the object and hash it against the register."""
+    """Expensive check: download the object and hash it against the register.
+
+    An EC share row carries its own share_hash; a plain replica is the
+    whole stored object and verifies against the chunk hash."""
+    expected = replica["share_hash"] or replica["chunk_hash"]
     try:
         obj = await handle.instance.get(RemoteRef(replica["remote_ref"]))
     except Exception:
         _demote(register, replica, report)
         register.update_reliability(handle.id, False, prior=handle.reliability)
         return
-    if blake3(obj).hexdigest() != replica["chunk_hash"]:
+    if blake3(obj).hexdigest() != expected:
         # definitive corruption — no second chances
         register.set_replica_state(replica["id"], "lost")
         report.marked_lost += 1
@@ -137,6 +141,86 @@ async def scrub(
     return report
 
 
+async def _repair_ec_chunk(
+    register: Register, handles, by_id, chunk, replicas, report: ScrubReport
+) -> None:
+    """Regenerate an EC chunk's missing shares (TASKS.md Phase 5 §1).
+
+    Fetch any k verified shares, reconstruct the chunk, re-encode exactly
+    the share indices that have no live row, and place them on providers
+    holding no live share of this chunk. A suspect row whose index gets a
+    fresh copy is superseded to lost, mirroring the replica-scheme rule.
+    """
+    label = f"{chunk['vpath']} chunk {chunk['seq']} (ec)"
+    k, n = chunk["ec_k"], chunk["ec_n"]
+
+    shares: dict[int, bytes] = {}
+    for replica in replicas:
+        if len(shares) >= k:
+            break
+        if replica["state"] == "lost" or replica["share_index"] in shares:
+            continue
+        try:
+            data = await by_id[replica["provider_id"]].instance.get(
+                RemoteRef(replica["remote_ref"])
+            )
+        except Exception:
+            continue
+        if blake3(data).hexdigest() == replica["share_hash"]:
+            shares[replica["share_index"]] = data
+    if len(shares) < k:
+        report.unrepairable.append(
+            f"{label}: only {len(shares)} of {k} shares recoverable"
+        )
+        return
+
+    live_rows = [r for r in replicas if r["state"] in ("stored", "pending")]
+    present = {r["share_index"] for r in live_rows}
+    missing = [i for i in range(n) if i not in present]
+    if not missing:
+        return  # raced with another writer; nothing to do
+    try:
+        fresh = ec.regenerate(shares, k, n, chunk["stored_size"], missing)
+    except ScatterboxError as exc:
+        report.unrepairable.append(f"{label}: {exc}")
+        return
+
+    # one share per provider: anyone with a live share is out
+    exclude = {r["provider_id"] for r in replicas if r["state"] != "lost"}
+    try:
+        targets = (
+            await placement.select_targets(
+                handles,
+                Policy(replicas=len(missing)),
+                max(len(next(iter(fresh.values()))), 1),
+                exclude_ids=list(exclude),
+            )
+        )[: len(missing)]
+    except NotEnoughProvidersError as exc:
+        report.unrepairable.append(f"{label}: {exc}")
+        return
+    for index, target in zip(missing, targets):
+        data = fresh[index]
+        try:
+            ref = await target.instance.put(f"{chunk['chunk_hash']}.{index}", data)
+        except Exception as exc:
+            report.unrepairable.append(
+                f"{label}: share {index} upload to {target.name} failed: {exc}"
+            )
+            continue
+        register.add_replica(
+            chunk["chunk_row_id"],
+            target.id,
+            ref.value,
+            share_index=index,
+            share_hash=blake3(data).hexdigest(),
+        )
+        report.repaired += 1
+        for stale in replicas:
+            if stale["share_index"] == index and stale["state"] == "suspect":
+                register.set_replica_state(stale["id"], "lost")
+
+
 async def repair_chunks(
     register: Register,
     report: ScrubReport | None = None,
@@ -157,6 +241,9 @@ async def repair_chunks(
     for chunk in register.chunks_below_floor():
         label = f"{chunk['vpath']} chunk {chunk['seq']}"
         replicas = register.get_replicas(chunk["chunk_row_id"])
+        if chunk["scheme"] == "ec":
+            await _repair_ec_chunk(register, handles, by_id, chunk, replicas, report)
+            continue
         # fetch the ciphertext from a surviving replica, healthiest first;
         # the hash check makes any source as good as a verified one
         obj = None

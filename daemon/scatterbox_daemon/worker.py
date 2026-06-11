@@ -16,7 +16,7 @@ from pathlib import Path
 
 from scatterbox import pipeline, portability, scrubber
 from scatterbox.errors import ScatterboxError
-from scatterbox.placement import Policy
+from scatterbox.placement import policy_from_dict
 from scatterbox_daemon.state import DaemonState
 
 _IDLE_POLL_S = 5.0  # fallback poll; normally the wake event fires first
@@ -113,12 +113,7 @@ async def _upload(state: DaemonState, job_id: int, p: dict) -> dict:
             state.vault.master_key,
             tmp,
             p["vpath"],
-            policy=Policy(
-                replicas=p.get("replicas", pipeline.DEFAULT_REPLICAS),
-                min_spread=p.get("spread", 1),
-                spread_mode=p.get("spread_mode", "disjoint"),
-                spread_cap=p.get("spread_cap"),
-            ),
+            policy=policy_from_dict(p.get("policy", {})),
             secrets=state.vault,
             on_progress=on_progress,
         )
@@ -130,6 +125,7 @@ async def _upload(state: DaemonState, job_id: int, p: dict) -> dict:
         "chunks": result.chunk_count,
         "replicas": result.replicas,
         "spread": result.spread,
+        "scheme": result.scheme,
     }
 
 

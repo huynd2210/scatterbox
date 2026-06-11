@@ -32,6 +32,15 @@ does not make free tiers a place for irreplaceable data.
   learned reliability, and latency class; chunks forced onto sketchy homes
   get extra copies. A scrubber probes replicas in rotation, demotes failures
   (stored → suspect → lost), and re-replicates anything below its floor.
+- **Per-folder policies and erasure coding.** Attach a placement policy to
+  any folder (`scatterbox policy set /cold --scheme ec --ec-k 3 --ec-n 5`,
+  or the *policy* button in the explorer) — files stored under it inherit
+  automatically; explicit flags win field by field. With `ec(k,n)`, each
+  chunk becomes n shares on n distinct providers and any k rebuild it:
+  surviving n−k provider losses at n/k× storage instead of n× — and no
+  provider ever holds more than 1/k of (undecryptable) ciphertext. The
+  scrubber verifies shares individually and repair regenerates exactly the
+  missing ones.
 - **Anti-colocation on demand.** By default each replica provider holds a
   full (encrypted) copy. `put --spread N` splits a file's chunks across N
   shard groups instead, so no single provider ever holds the whole file — a
@@ -58,7 +67,7 @@ current work is tracked in [TASKS.md](TASKS.md).
 | 2 | Real providers + vault (Google Drive, OneDrive, OAuth, secret vault) | ✅ code complete — real-credential gates pending |
 | 3 | Daemon + web explorer (FastAPI, React, virtualized listing) | ✅ |
 | 4 | Portability + recovery (export/import, register snapshots to providers) | ✅ |
-| 5 | Policies, erasure coding, exotic adapters (Discord, transform stage) | — |
+| 5 | Policies, erasure coding (+ adapter registry; exotic adapters deferred) | ✅ |
 
 ## Install
 
