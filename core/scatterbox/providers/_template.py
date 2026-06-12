@@ -96,3 +96,10 @@ class TemplateProvider:
 
     async def quota(self) -> Quota:
         return Quota(total_bytes=None, used_bytes=0, confidence="unknown")
+
+    async def find(self, name: str) -> RemoteRef | None:
+        """OPTIONAL: locate an object by its put-time name without a stored
+        ref. Implement it if the backend can search/address by name — it
+        lets this provider serve as a cold-recovery source (passphrase-only
+        disaster recovery). Omit the method entirely otherwise."""
+        raise NotImplementedError

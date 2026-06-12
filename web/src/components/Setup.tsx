@@ -5,9 +5,9 @@ import type { NewProvider, ProviderInfo } from "../types";
 /** First-run wizard: set up fresh (vault + providers) or import an existing
  * archive — the same two paths the CLI offers, without leaving the browser. */
 export function SetupWizard({ onDone }: { onDone: () => void }) {
-  const [step, setStep] = useState<"choice" | "passphrase" | "providers" | "import">(
-    "choice",
-  );
+  const [step, setStep] = useState<
+    "choice" | "passphrase" | "providers" | "import" | "recover"
+  >("choice");
 
   return (
     <div className="center-screen wide">
@@ -29,6 +29,13 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
                 from provider snapshots
               </span>
             </button>
+            <button className="choice" onClick={() => setStep("recover")}>
+              <strong>recover with passphrase</strong>
+              <span className="muted small">
+                no files at all — re-authenticate one provider and pull the
+                snapshot scatterbox kept there
+              </span>
+            </button>
           </div>
         </>
       )}
@@ -36,6 +43,9 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
       {step === "providers" && <ProvidersStep onDone={onDone} />}
       {step === "import" && (
         <ImportStep onDone={onDone} onBack={() => setStep("choice")} />
+      )}
+      {step === "recover" && (
+        <RecoverStep onDone={onDone} onBack={() => setStep("choice")} />
       )}
     </div>
   );
@@ -92,6 +102,115 @@ function ImportStep({ onDone, onBack }: { onDone: () => void; onBack: () => void
         />
         <button disabled={busy || files.length === 0 || passphrase === ""}>
           {busy ? "importing…" : "import"}
+        </button>
+        <button type="button" className="ghost" onClick={onBack}>
+          back
+        </button>
+        {error && <p className="error">{error}</p>}
+      </form>
+    </>
+  );
+}
+
+/** Cold recovery: nothing local survives — passphrase + re-auth ONE
+ * provider; the register snapshot found there rebuilds everything. */
+function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
+  const [type, setType] = useState("localfs");
+  const [root, setRoot] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<string[] | null>(null);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    api
+      .recover({
+        passphrase,
+        type,
+        root: root || undefined,
+        client_id: clientId || undefined,
+        client_secret: clientSecret || undefined,
+      })
+      .then((result) => {
+        if (result.pending_reauth.length > 0) {
+          setPending(result.pending_reauth); // show the to-do before entering
+        } else {
+          onDone();
+        }
+      })
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setBusy(false));
+  };
+
+  if (pending !== null) {
+    return (
+      <>
+        <h2>recovered ✓</h2>
+        <p className="muted">
+          These providers still need their credentials restored (providers
+          tab → reauth): <strong>{pending.join(", ")}</strong>
+        </p>
+        <button onClick={onDone}>open explorer</button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2>recover with passphrase only</h2>
+      <p className="muted">
+        Point at any provider that held your data — scatterbox keeps an
+        encrypted register snapshot on the most reliable ones. Your
+        passphrase decrypts it and everything comes back.
+      </p>
+      <form onSubmit={submit} className="unlock">
+        <select value={type} onChange={(e) => setType(e.target.value)}>
+          <option value="localfs">local folder</option>
+          <option value="gdrive">Google Drive</option>
+          <option value="onedrive">OneDrive</option>
+        </select>
+        {type === "localfs" ? (
+          <input
+            placeholder="the provider's folder path"
+            value={root}
+            onChange={(e) => setRoot(e.target.value)}
+          />
+        ) : (
+          <>
+            <input
+              placeholder="OAuth client id"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+            />
+            {type === "gdrive" && (
+              <input
+                type="password"
+                placeholder="OAuth client secret"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+              />
+            )}
+            <p className="muted small">
+              A consent tab will open in your browser; this form waits until
+              you finish there.
+            </p>
+          </>
+        )}
+        <input
+          type="password"
+          placeholder="master passphrase"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+        />
+        <button
+          disabled={busy || passphrase === "" || (type === "localfs" ? !root : !clientId)}
+        >
+          {busy ? "recovering…" : "recover"}
         </button>
         <button type="button" className="ghost" onClick={onBack}>
           back

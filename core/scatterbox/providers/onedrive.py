@@ -179,6 +179,17 @@ class OneDriveProvider:
         self._check(resp, "exists probe")
         return "deleted" not in resp.json()
 
+    async def find(self, name: str) -> RemoteRef | None:
+        """Locate an object by its put-time name: the app folder is
+        path-addressable, so this is one direct lookup."""
+        resp = await self._http.request(
+            "GET", f"{_GRAPH}/me/drive/special/approot:/{name}?$select=id"
+        )
+        if resp.status_code == 404:
+            return None
+        self._check(resp, "find")
+        return RemoteRef(resp.json()["id"])
+
     async def quota(self) -> Quota:
         """Drive quota from Graph — 'exact' confidence, optionally tightened
         by the user's capacity cap."""

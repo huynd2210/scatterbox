@@ -82,7 +82,7 @@ class FakeGraph:
         if request.headers.get("Authorization") != f"Bearer {self.valid_token}":
             return httpx.Response(401, json={"error": "InvalidAuthenticationToken"})
 
-        # approot simple upload / session creation
+        # approot simple upload / session creation / find-by-path
         if path.startswith("/v1.0/me/drive/special/approot:/"):
             name = path.removeprefix("/v1.0/me/drive/special/approot:/").split(":/")[0]
             if path.endswith(":/content") and request.method == "PUT":
@@ -93,6 +93,14 @@ class FakeGraph:
                 return httpx.Response(
                     200, json={"uploadUrl": "https://upload.graph.example/session1"}
                 )
+            if request.method == "GET":  # find(): direct path lookup
+                match = next(
+                    (oid for oid, o in self.objects.items() if o["name"] == name),
+                    None,
+                )
+                if match is None:
+                    return httpx.Response(404, json={"error": "itemNotFound"})
+                return httpx.Response(200, json={"id": match})
 
         if path == "/v1.0/me/drive":
             return httpx.Response(200, json={"quota": self.quota})
@@ -202,6 +210,13 @@ def test_quota_exact_and_user_cap(graph):
     assert (q.total_bytes, q.used_bytes, q.confidence) == (5368709120, 1000000, "exact")
     capped, _ = make_provider(graph, capacity_bytes=42)
     assert asyncio.run(capped.quota()).total_bytes == 42
+
+
+def test_find_by_path(graph):
+    provider, _ = make_provider(graph)
+    assert asyncio.run(provider.find("register-snap")) is None
+    ref = asyncio.run(provider.put("register-snap", b"snapshot bytes"))
+    assert asyncio.run(provider.find("register-snap")).value == ref.value
 
 
 def test_max_object_bytes_enforced_locally(graph):

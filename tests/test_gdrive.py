@@ -70,9 +70,22 @@ class FakeDrive:
             self.objects[oid]["data"] = request.content
             return httpx.Response(200, json={"id": oid})
 
-        # folder search / create
+        # folder search / create / find-by-name
         if path == "/drive/v3/files" and request.method == "GET":
             q = dict(urllib.parse.parse_qsl(request.url.query.decode()))["q"]
+            if "mimeType" not in q:
+                # find(): exact-name object lookup, newest first — newest =
+                # highest counter in this fake
+                wanted = q.split("name = '")[1].split("'")[0]
+                matches = sorted(
+                    (oid for oid, o in self.objects.items()
+                     if o["name"] == wanted and not o["trashed"]),
+                    key=lambda oid: int(oid.removeprefix("id")),
+                    reverse=True,
+                )
+                return httpx.Response(
+                    200, json={"files": [{"id": oid} for oid in matches[:1]]}
+                )
             assert "scatterbox" in q
             files = [{"id": self.folder_id}] if self.folder_id else []
             return httpx.Response(200, json={"files": files})
@@ -235,6 +248,20 @@ def test_quota_exact_and_user_cap(drive):
     drive.quota = {"usage": "123"}  # unlimited plan: no limit field
     q = asyncio.run(make_provider(drive)[0].quota())
     assert q.total_bytes is None and q.confidence == "unknown"
+
+
+def test_find_by_name_returns_newest_duplicate(drive):
+    """Drive allows duplicate names; find() must return the newest match
+    (older duplicates are previous snapshot generations awaiting cleanup)."""
+    provider, _ = make_provider(drive)
+    assert asyncio.run(provider.find("register-snap")) is None
+    ref1 = asyncio.run(provider.put("register-snap", b"old"))
+    ref2 = asyncio.run(provider.put("register-snap", b"new"))
+    assert ref1.value != ref2.value  # true duplicates
+    found = asyncio.run(provider.find("register-snap"))
+    assert found.value == ref2.value
+    drive.objects[ref2.value]["trashed"] = True
+    assert asyncio.run(provider.find("register-snap")).value == ref1.value
 
 
 def test_max_object_bytes_enforced_locally(drive):

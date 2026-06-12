@@ -36,6 +36,34 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       .then(({ job_id }) => setMessage(`scrub queued (job ${job_id}) — see transfers`))
       .catch((e: Error) => setMessage(e.message));
 
+  const reauth = (p: ProviderInfo, askCreds = false) => {
+    // First try reusing the stored client app credentials; the daemon asks
+    // for them only when none survive (e.g. right after a cold recovery).
+    const body: { client_id?: string; client_secret?: string } = {};
+    if (askCreds) {
+      const id = prompt(`OAuth client id for ${p.name}`);
+      if (!id) return;
+      body.client_id = id;
+      if (p.type === "gdrive") {
+        body.client_secret = prompt("OAuth client secret") ?? undefined;
+      }
+    }
+    setMessage(`re-authenticating ${p.name} — check your browser…`);
+    api
+      .reauthProvider(p.name, body)
+      .then(() => {
+        setMessage(`re-authenticated ${p.name}`);
+        refresh();
+      })
+      .catch((e: Error) => {
+        if (!askCreds && e.message.includes("client id")) {
+          reauth(p, true); // no stored credentials — ask the user
+        } else {
+          setMessage(e.message);
+        }
+      });
+  };
+
   if (providers === null) return <p className="muted empty">loading…</p>;
 
   return (
@@ -67,7 +95,16 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       )}
       {message && <p className="muted">{message}</p>}
       {providers.map((p) => (
-        <ProviderCard key={p.id} p={p} onRemove={() => remove(p)} />
+        <ProviderCard
+          key={p.id}
+          p={p}
+          onRemove={() => remove(p)}
+          onReauth={
+            p.type === "gdrive" || p.type === "onedrive"
+              ? () => reauth(p)
+              : undefined
+          }
+        />
       ))}
       {providers.length === 0 && !adding && (
         <p className="muted empty">no providers yet — add one above</p>
@@ -77,8 +114,16 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
 }
 
 /** One provider card: capacity bar with its confidence label, learned
- * reliability, replicas held, remove action. */
-function ProviderCard({ p, onRemove }: { p: ProviderInfo; onRemove: () => void }) {
+ * reliability, replicas held, reauth (OAuth types) and remove actions. */
+function ProviderCard({
+  p,
+  onRemove,
+  onReauth,
+}: {
+  p: ProviderInfo;
+  onRemove: () => void;
+  onReauth?: () => void;
+}) {
   const q = p.quota;
   const frac =
     q && q.total !== null && q.total > 0 ? Math.min(q.used / q.total, 1) : null;
@@ -92,6 +137,12 @@ function ProviderCard({ p, onRemove }: { p: ProviderInfo; onRemove: () => void }
           {p.replicas_held} replica(s) held
           {p.reliability !== null && ` · reliability ${(p.reliability * 100).toFixed(0)}%`}
           {p.latency_class && ` · ${p.latency_class}`}
+          {onReauth && (
+            <a className="remove" onClick={onReauth} title="re-run the OAuth consent (expired/revoked/recovered)">
+              {" "}
+              reauth
+            </a>
+          )}
           <a className="danger remove" onClick={onRemove} title="remove provider">
             {" "}
             ✕

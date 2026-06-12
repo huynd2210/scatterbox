@@ -132,12 +132,13 @@ def test_snapshot_and_restore_from_providers(home, tmp_path):
     locations = v.get_secret(portability.SNAPSHOT_SECRET)["locations"]
     assert len(locations) == 2
 
-    # a second snapshot supersedes the first: old objects are deleted
+    # a second snapshot supersedes the first in place (fixed object name):
+    # still exactly one object per target provider
     asyncio.run(portability.snapshot_to_providers(reg, v))
     snapshot_objects = [
         f
         for i in range(3)
-        for f in (tmp_path / f"prov{i}").rglob("register-snapshot-*")
+        for f in (tmp_path / f"prov{i}").rglob(f"*{portability.SNAPSHOT_OBJECT_NAME}")
     ]
     assert len(snapshot_objects) == 2
 

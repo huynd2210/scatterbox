@@ -126,7 +126,9 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     for member in zf.namelist():
                         classify(zf.read(member))
-            elif data.startswith((b"SBSNAP1\n", b"SQLite format 3\x00")):
+            elif portability.is_snapshot(data) or data.startswith(
+                b"SQLite format 3\x00"
+            ):
                 register_blob = data
             else:
                 try:
@@ -143,14 +145,32 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
         for f in files:
             classify(await f.read())
-        if vault_bytes is None:
-            raise HTTPException(status_code=400, detail="no vault.json among the files")
+        if vault_bytes is None and not (
+            register_blob is not None and portability.snapshot_kdf(register_blob)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="no vault.json among the files (a v2 register snapshot "
+                "alone also works — it carries its own key parameters)",
+            )
 
         # The daemon holds the (empty, pre-init) register open; release it
         # around the file swap and reopen whatever the import installed.
         state.register.close()
         try:
-            if register_blob is not None:
+            if vault_bytes is None:
+                # lone v2 snapshot: rebuild register AND vault from the
+                # passphrase + embedded KDF params; OAuth providers will
+                # need reauth (their tokens lived in the lost vault)
+                v, count = await asyncio.to_thread(
+                    portability.install_snapshot_blob,
+                    state.home,
+                    passphrase,
+                    register_blob,
+                    force=True,
+                )
+                source = "snapshot"
+            elif register_blob is not None:
                 v, count = await asyncio.to_thread(
                     portability.import_archive,
                     state.home,
@@ -181,7 +201,101 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         finally:
             state.register = Register(state.home / "register.db")
         state.vault = v  # imported and already unlocked — straight to the explorer
-        return {"files": count, "restored_from": source}
+        return {
+            "files": count,
+            "restored_from": source,
+            "pending_reauth": onboarding.pending_reauth(state.register, v),
+        }
+
+    @app.post("/api/recover")
+    async def recover(request: Request, body: dict):
+        """COLD recovery from the wizard: passphrase + one re-authenticated
+        provider, nothing local. For OAuth types a consent tab opens in the
+        user's browser; the request waits for the flow."""
+        state = _state(request)
+        if (state.home / "vault.json").is_file():
+            raise HTTPException(status_code=409, detail="already initialized")
+        passphrase = body.get("passphrase", "")
+        if not passphrase:
+            raise HTTPException(status_code=400, detail="passphrase required")
+        type_ = body.get("type", "localfs")
+        blob: dict | None = None
+        try:
+            if type_ == "localfs":
+                root = (body.get("root") or "").strip()
+                if not root:
+                    raise HTTPException(status_code=400, detail="root directory required")
+                provider = create_provider("localfs", {"root": root})
+            elif type_ in onboarding.oauth_types():
+                client_id = (body.get("client_id") or "").strip()
+                if not client_id:
+                    raise HTTPException(status_code=400, detail="OAuth client id required")
+                blob = await asyncio.to_thread(
+                    onboarding.acquire_oauth_blob,
+                    type_,
+                    client_id=client_id,
+                    client_secret=(body.get("client_secret") or "").strip() or None,
+                )
+                provider = create_provider(
+                    type_, {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+                )
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"unsupported provider type {type_!r} ({', '.join(known_types())})",
+                )
+
+            state.register.close()
+            try:
+                v, count = await portability.recover_register_cold(
+                    state.home, passphrase, provider, force=True
+                )
+            finally:
+                state.register = Register(state.home / "register.db")
+            adopted = None
+            if blob is not None:
+                adopted = portability.adopt_recovered_credentials(
+                    state.register, v, type_, blob, name=(body.get("name") or None)
+                )
+        except ScatterboxError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        state.vault = v
+        return {
+            "files": count,
+            "adopted": adopted,
+            "pending_reauth": onboarding.pending_reauth(state.register, v),
+        }
+
+    @app.post("/api/providers/{name}/reauth")
+    async def reauth(request: Request, name: str, body: dict | None = None):
+        """Fresh OAuth consent for an existing provider (expired/revoked
+        tokens, or credentials missing after recovery). Register row and
+        replicas untouched."""
+        state = _state(request)
+        _require_unlocked(state)
+        body = body or {}
+
+        def run_reauth():
+            # own register connection: this runs on a worker thread (the
+            # browser consent blocks), and sqlite must not cross threads
+            reg = Register(state.home / "register.db")
+            try:
+                return onboarding.reauth_provider(
+                    reg,
+                    state.vault,
+                    name,
+                    client_id=(body.get("client_id") or "").strip() or None,
+                    client_secret=(body.get("client_secret") or "").strip() or None,
+                )
+            finally:
+                reg.close()
+
+        try:
+            await asyncio.to_thread(run_reauth)
+        except ScatterboxError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        await state.ws.broadcast({"type": "files-changed"})
+        return {"reauthed": name}
 
     @app.get("/api/export")
     async def export_backup(request: Request):
@@ -190,7 +304,9 @@ def create_app(home: Path | str | None = None) -> FastAPI:
         state = _state(request)
         _require_unlocked(state)
         snapshot = portability.encrypt_snapshot(
-            portability.register_bytes(state.register), state.vault.master_key
+            portability.register_bytes(state.register),
+            state.vault.master_key,
+            state.vault.kdf,
         )
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:  # already compressed

@@ -88,18 +88,11 @@ def onboard_oauth_provider(
     Blocks until the user finishes (or abandons) the browser consent —
     callers in async contexts run this in a thread.
     """
-    modules = oauth_types()
-    if type_ not in modules:
-        raise ScatterboxError(f"unknown OAuth provider type {type_!r}")
     _ensure_name_free(register, name)
-    mod = modules[type_]
-    blob = oauth.run_loopback_flow(
-        auth_url=mod.AUTH_URL,
-        token_url=mod.TOKEN_URL,
+    blob = acquire_oauth_blob(
+        type_,
         client_id=client_id,
-        scopes=mod.SCOPES,
         client_secret=client_secret,
-        extra_auth_params=getattr(mod, "EXTRA_AUTH_PARAMS", None),
         open_browser=open_browser,
     )
     secret_name = f"provider:{name}"
@@ -116,6 +109,86 @@ def onboard_oauth_provider(
         vault.delete_secret(secret_name)  # don't strand tokens for a failed add
         raise
     return quota
+
+
+def acquire_oauth_blob(
+    type_: str,
+    *,
+    client_id: str,
+    client_secret: str | None = None,
+    open_browser: bool = True,
+) -> dict:
+    """Run the browser consent flow for an OAuth backend type and return
+    the token blob — without touching register or vault. Cold recovery uses
+    this before any vault exists."""
+    modules = oauth_types()
+    if type_ not in modules:
+        raise ScatterboxError(f"unknown OAuth provider type {type_!r}")
+    mod = modules[type_]
+    return oauth.run_loopback_flow(
+        auth_url=mod.AUTH_URL,
+        token_url=mod.TOKEN_URL,
+        client_id=client_id,
+        scopes=mod.SCOPES,
+        client_secret=client_secret,
+        extra_auth_params=getattr(mod, "EXTRA_AUTH_PARAMS", None),
+        open_browser=open_browser,
+    )
+
+
+def reauth_provider(
+    register: Register,
+    vault: Vault,
+    name: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    open_browser: bool = True,
+) -> Quota:
+    """Re-run the OAuth consent for an EXISTING provider row and store the
+    fresh tokens under its existing secret name — no register changes, no
+    replica loss. The fix for expired/revoked tokens and for providers left
+    credential-less by a recovery.
+
+    Client app credentials are reused from the previous token blob when
+    still present in the vault; otherwise the caller must supply them.
+    Returns the post-reauth quota (the connection test).
+    """
+    row = register.get_provider_by_name(name)
+    if row["type"] not in oauth_types():
+        raise ScatterboxError(
+            f"provider {name!r} ({row['type']}) does not use OAuth — nothing to reauth"
+        )
+    config = json.loads(row["config"])
+    secret_name = config.get("secret") or f"provider:{name}"
+    if client_id is None and vault.has_secret(secret_name):
+        previous = vault.get_secret(secret_name)
+        client_id = previous.get("client_id")
+        client_secret = client_secret or previous.get("client_secret")
+    if not client_id:
+        raise ScatterboxError(
+            "no previous client credentials to reuse — pass the OAuth client id"
+        )
+    blob = acquire_oauth_blob(
+        row["type"],
+        client_id=client_id,
+        client_secret=client_secret,
+        open_browser=open_browser,
+    )
+    vault.set_secret(secret_name, blob)
+    instance = create_provider(row["type"], config, vault)
+    return asyncio.run(instance.quota())  # connection test with the new tokens
+
+
+def pending_reauth(register: Register, vault: Vault) -> list[str]:
+    """Provider names whose credentials are missing from the vault — the
+    post-recovery to-do list."""
+    out = []
+    for row in register.list_providers():
+        secret_name = json.loads(row["config"]).get("secret")
+        if secret_name is not None and not vault.has_secret(secret_name):
+            out.append(row["name"])
+    return out
 
 
 def remove_provider(

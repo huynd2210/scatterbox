@@ -96,3 +96,10 @@ class Provider(Protocol):
     async def quota(self) -> Quota: ...
 
     def profile(self) -> ProviderProfile: ...
+
+    # OPTIONAL (recovery duck-types via getattr): locate an object by the
+    # name it was put() under, without a stored ref — what makes cold
+    # recovery (passphrase + one re-authed provider) possible. Adapters
+    # that cannot search by name may omit it; they then simply cannot
+    # serve as a cold-recovery source.
+    async def find(self, name: str) -> RemoteRef | None: ...

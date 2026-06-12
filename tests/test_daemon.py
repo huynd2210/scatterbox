@@ -333,7 +333,11 @@ def test_export_zip_and_import_on_fresh_home(client, home, tmp_path):
             data={"passphrase": PASS},
         )
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"files": 1, "restored_from": "files"}
+        assert resp.json() == {
+            "files": 1,
+            "restored_from": "files",
+            "pending_reauth": [],  # localfs providers keep no credentials
+        }
         # imported AND unlocked — straight into the explorer
         status = client_b.get("/api/status").json()
         assert status["initialized"] is True and status["locked"] is False

@@ -83,6 +83,13 @@ class LocalFSProvider:
     async def exists(self, ref: RemoteRef) -> bool:
         return self._path(ref).is_file()
 
+    async def find(self, name: str) -> RemoteRef | None:
+        """Locate an object by its put-time name (cold recovery uses this
+        for the well-known register snapshot). put() is deterministic, so
+        this is a single path probe."""
+        rel = f"{name[:2]}/{name}"
+        return RemoteRef(rel) if (self.root / rel).is_file() else None
+
     async def quota(self) -> Quota:
         """Configured cap = 'estimated' confidence; no cap = 'unknown'."""
         used = self._used_bytes()

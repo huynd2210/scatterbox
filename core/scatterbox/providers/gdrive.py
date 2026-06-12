@@ -217,6 +217,22 @@ class GDriveProvider:
         # purge it — treat it as missing so repair makes a real copy.
         return not resp.json().get("trashed", False)
 
+    async def find(self, name: str) -> RemoteRef | None:
+        """Locate an object by its put-time name — Drive allows duplicate
+        names, so take the newest non-trashed match (older duplicates are
+        the previous snapshot generations awaiting cleanup)."""
+        q = f"name = '{name}' and trashed = false"
+        resp = self._check(
+            await self._http.request(
+                "GET",
+                f"{_API}/files?q={urllib.parse.quote(q)}"
+                "&orderBy=modifiedTime desc&pageSize=1&fields=files(id)",
+            ),
+            "find",
+        )
+        found = resp.json().get("files", [])
+        return RemoteRef(found[0]["id"]) if found else None
+
     async def quota(self) -> Quota:
         """Account storage numbers from the about endpoint — 'exact'
         confidence, optionally tightened by the user's capacity cap."""

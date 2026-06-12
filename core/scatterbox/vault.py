@@ -57,6 +57,32 @@ class SecretStore(Protocol):
     def set_secret(self, name: str, value: Any) -> None: ...
 
 
+class MemorySecretStore:
+    """Dict-backed SecretStore for the window where no vault exists yet
+    (cold recovery re-auths a provider before the vault is recreated)."""
+
+    def __init__(self, **secrets: Any) -> None:
+        self._secrets = dict(secrets)
+
+    def get_secret(self, name: str) -> Any:
+        return self._secrets[name]
+
+    def set_secret(self, name: str, value: Any) -> None:
+        self._secrets[name] = value
+
+
+def derive_from_kdf(passphrase: str, kdf: dict) -> bytes:
+    """Master key from a passphrase + a vault-format kdf dict (as stored in
+    vault.json and embedded in v2 snapshots)."""
+    return keys.derive_master_key(
+        passphrase,
+        base64.b64decode(kdf["salt"]),
+        time_cost=kdf["time_cost"],
+        memory_cost=kdf["memory_cost"],
+        parallelism=kdf["parallelism"],
+    )
+
+
 @dataclass
 class Vault:
     """An unlocked vault: the master key plus the decrypted secrets map.
@@ -67,6 +93,10 @@ class Vault:
 
     master_key: bytes
     path: Path | None = None  # None = in-memory only (tests)
+    # The KDF parameters this vault was created with (salt b64 + work
+    # factors). Non-secret; embedded in register snapshots so a passphrase
+    # alone can re-derive the master key during cold recovery.
+    kdf: dict[str, Any] | None = None
     _secrets: dict[str, Any] = field(default_factory=dict)
 
     def get_secret(self, name: str) -> Any:
@@ -112,14 +142,25 @@ def create_vault(
     time_cost: int = keys.DEFAULT_TIME_COST,
     memory_cost: int = keys.DEFAULT_MEMORY_COST,
     parallelism: int = keys.DEFAULT_PARALLELISM,
+    kdf_params: dict | None = None,
 ) -> Vault:
     """First-time setup: pick a random salt, derive the master key, write the
     vault JSON. Refuses to overwrite an existing vault (that would orphan
-    every already-encrypted file)."""
+    every already-encrypted file).
+
+    kdf_params reuses an existing salt + work factors instead of generating
+    fresh ones — cold recovery MUST keep the original salt, or the restored
+    register's wrapped file keys would no longer unwrap."""
     path = Path(path)
     if path.exists():
         raise ScatterboxError(f"vault already exists at {path}")
-    salt = os.urandom(_SALT_LEN)
+    if kdf_params is not None:
+        salt = base64.b64decode(kdf_params["salt"])
+        time_cost = kdf_params["time_cost"]
+        memory_cost = kdf_params["memory_cost"]
+        parallelism = kdf_params["parallelism"]
+    else:
+        salt = os.urandom(_SALT_LEN)
     master_key = keys.derive_master_key(
         passphrase,
         salt,
@@ -144,7 +185,7 @@ def create_vault(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    return Vault(master_key=master_key, path=path)
+    return Vault(master_key=master_key, path=path, kdf=doc["kdf"])
 
 
 def unlock_vault(path: Path | str, passphrase: str) -> Vault:
@@ -183,4 +224,4 @@ def unlock_vault(path: Path | str, passphrase: str) -> Vault:
             # dropping every stored credential.
             raise ScatterboxError(f"vault secrets section is corrupt in {path}") from exc
         secrets = json.loads(plaintext)
-    return Vault(master_key=master_key, path=path, _secrets=secrets)
+    return Vault(master_key=master_key, path=path, kdf=kdf, _secrets=secrets)

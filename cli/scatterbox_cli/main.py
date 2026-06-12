@@ -399,6 +399,36 @@ def provider_remove(
         )
 
 
+@provider_app.command("reauth")
+def provider_reauth(
+    name: Annotated[str, typer.Argument()],
+    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id; reused from the previous tokens if omitted.")] = None,
+    client_secret: Annotated[Optional[str], typer.Option(help="OAuth client secret (gdrive).")] = None,
+    no_browser: Annotated[bool, typer.Option("--no-browser")] = False,
+) -> None:
+    """Re-run the OAuth consent for an existing provider (expired/revoked
+    tokens, or credentials missing after a cold recovery). Keeps the
+    register row and every replica."""
+    register = _open_register()
+    try:
+        quota = onboarding.reauth_provider(
+            register,
+            _unlock(),
+            name,
+            client_id=client_id,
+            client_secret=client_secret,
+            open_browser=not no_browser,
+        )
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    finally:
+        register.close()
+    free = "" if quota.total_bytes is None else (
+        f" ({_human(quota.total_bytes - quota.used_bytes)} free)"
+    )
+    typer.echo(f"re-authenticated provider {name}{free}")
+
+
 @provider_app.command("set")
 def provider_set(
     name: Annotated[str, typer.Argument()],
@@ -542,9 +572,13 @@ def export(
     """Export the register + vault for moving to another machine (PLAN.md §9)."""
     register = _open_register()
     try:
-        master_key = None if plain else _unlock().master_key
+        v = None if plain else _unlock()
         reg_path, vault_path = portability.export_archive(
-            register, _home() / "vault.json", dest, master_key=master_key
+            register,
+            _home() / "vault.json",
+            dest,
+            master_key=v.master_key if v else None,
+            kdf=v.kdf if v else None,
         )
     except ScatterboxError as exc:
         _fail(str(exc))
@@ -610,6 +644,75 @@ def restore(
     except ScatterboxError as exc:
         _fail(str(exc))
     typer.echo(f"restored register with {files} file(s) from provider {provider!r}")
+
+
+@app.command()
+def recover(
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive.")],
+    root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
+    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (gdrive/onedrive); prompted if omitted.")] = None,
+    name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
+    no_browser: Annotated[bool, typer.Option("--no-browser")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing home.")] = False,
+) -> None:
+    """COLD disaster recovery: rebuild everything from your passphrase plus
+    one re-authenticated provider — no vault file, no register, no exports.
+
+    Finds the register snapshot on the provider by its well-known name,
+    decrypts it with your passphrase, recreates the vault, and adopts the
+    re-authenticated credentials. Other OAuth providers then need
+    'scatterbox provider reauth'.
+    """
+    passphrase = _passphrase()
+    blob: dict | None = None
+    try:
+        if type_ == "localfs":
+            if root is None:
+                _fail("--root is required for localfs recovery")
+            provider = create_provider("localfs", {"root": str(root.resolve())})
+        elif type_ in onboarding.oauth_types():
+            if client_id is None:
+                client_id = typer.prompt("OAuth client id")
+            client_secret = (
+                typer.prompt("OAuth client secret", hide_input=True)
+                if type_ == "gdrive"
+                else None
+            )
+            blob = onboarding.acquire_oauth_blob(
+                type_,
+                client_id=client_id,
+                client_secret=client_secret,
+                open_browser=not no_browser,
+            )
+            provider = create_provider(
+                type_, {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+            )
+        else:
+            _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
+
+        v, files = asyncio.run(
+            portability.recover_register_cold(_home(), passphrase, provider, force=force)
+        )
+        register = Register(_home() / "register.db")
+        try:
+            if blob is not None:
+                adopted = portability.adopt_recovered_credentials(
+                    register, v, type_, blob, name=name
+                )
+                typer.echo(f"adopted credentials for provider {adopted!r}")
+            pending = onboarding.pending_reauth(register, v)
+        finally:
+            register.close()
+    except ScatterboxError as exc:
+        _fail(str(exc))
+    typer.echo(f"recovered register with {files} file(s) into {_home()}")
+    if pending:
+        typer.secho(
+            "providers still needing credentials: "
+            + ", ".join(pending)
+            + "  — run 'scatterbox provider reauth <name>' for each",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command()

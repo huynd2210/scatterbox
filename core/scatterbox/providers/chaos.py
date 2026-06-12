@@ -157,6 +157,11 @@ class ChaosProvider:
             return False
         return await self.inner.exists(ref)
 
+    async def find(self, name: str) -> RemoteRef | None:
+        """Discovery passthrough (kill/latency gated like everything else)."""
+        await self._gate()
+        return await self.inner.find(name)
+
     async def quota(self) -> Quota:
         await self._gate()
         return await self.inner.quota()

@@ -184,6 +184,12 @@ The register (where every chunk lives) + the vault (keys and credentials)
   rebuild everything: `scatterbox restore --vault vault.json`, or hand the
   wizard just the vault file. Keep a copy of vault.json somewhere safe; it
   is always encrypted.
+- **Cold recovery:** lost even the vault? Snapshots carry their own
+  (non-secret) key-derivation parameters and sit under a well-known name,
+  so **your passphrase + re-authenticating one provider** is enough:
+  `scatterbox recover --type gdrive`, or the first-run wizard's *recover
+  with passphrase*. Remaining cloud providers are restored one
+  `scatterbox provider reauth NAME` each — no re-uploads, ever.
 
 ## Security model in one paragraph
 

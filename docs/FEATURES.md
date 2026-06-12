@@ -212,6 +212,16 @@ Register + vault + passphrase = the whole archive; chunks never move.
   `scatterbox restore --vault vault.json`, or hand the wizard just the
   vault file. The vault knows the snapshot locations and already holds the
   provider credentials.
+- **Cold recovery (worst case — nothing local at all):** snapshots are v2
+  (`SBSNAP2`) — they embed the non-secret Argon2id parameters and sit under
+  a fixed, `find()`-discoverable name. So passphrase + re-authenticating
+  ONE provider rebuilds everything: `scatterbox recover --type gdrive`,
+  the wizard's *recover with passphrase*, or dropping a lone `.sbsnap`
+  into the import form. The vault is recreated with the original salt
+  (wrapped file keys keep unwrapping); the re-authed provider's tokens are
+  adopted automatically and the rest are one `scatterbox provider reauth
+  NAME` (or the *reauth* link on the provider card) each — register rows
+  and replicas untouched.
 
 ## 11. Web explorer
 
@@ -248,6 +258,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `GET /api/download?path=` | Streamed reassembled file |
 | `GET /api/jobs` | Job queue |
 | `GET/POST /api/providers`, `DELETE /api/providers/{name}` | List/onboard/remove |
+| `POST /api/recover`, `POST /api/providers/{name}/reauth` | Cold recovery; fresh OAuth consent for an existing provider |
 | `GET /api/policies`, `GET/PUT/DELETE /api/policy` | Folder policies |
 | `POST /api/scrub` | Enqueue scrub (deep/repair options) |
 | `WS /ws` | Job lifecycle + progress, files-changed, snapshot events |
@@ -265,7 +276,9 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |
-| `snapshot` / `restore [--vault FILE] [--force]` | Provider snapshot / disaster recovery |
+| `snapshot` / `restore [--vault FILE] [--force]` | Provider snapshot / vault-based disaster recovery |
+| `recover --type T [--root R \| --client-id …] [--name N]` | COLD recovery: passphrase + one re-authed provider, nothing local |
+| `provider reauth NAME [--client-id …]` | Fresh OAuth consent for an existing provider (tokens expired/revoked/recovered) |
 | `daemon [--host --port]` | Serve the API + web explorer |
 
 Environment: `SCATTERBOX_HOME` (state directory), `SCATTERBOX_PASSPHRASE`
