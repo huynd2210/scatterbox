@@ -173,6 +173,8 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="localfs">local folder</option>
           <option value="gdrive">Google Drive</option>
           <option value="onedrive">OneDrive</option>
+          <option value="dropbox">Dropbox</option>
+          <option value="pcloud">pCloud</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -187,7 +189,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
             />
-            {type === "gdrive" && (
+            {(type === "gdrive" || type === "pcloud") && (
               <input
                 type="password"
                 placeholder="OAuth client secret"
@@ -197,8 +199,10 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             )}
             <p className="muted small">
               A consent tab will open in your browser; this form waits until
-              you finish there.
+              you finish there. The original OAuth app may be gone along with
+              the machine — a freshly created one works just as well.
             </p>
+            <OAuthGuide type={type as "gdrive" | "onedrive" | "dropbox" | "pcloud"} />
           </>
         )}
         <input
@@ -312,6 +316,207 @@ function ProvidersStep({ onDone }: { onDone: () => void }) {
   );
 }
 
+/** Collapsible step-by-step OAuth app setup walkthrough. Bringing your own
+ * (free) client app is the price of SDK-free cloud adapters — these are the
+ * once-per-account console steps the form's one-line hint can't carry. */
+function OAuthGuide({
+  type,
+}: {
+  type: "gdrive" | "onedrive" | "dropbox" | "pcloud";
+}) {
+  const plural = type === "gdrive" || type === "pcloud"; // id + secret
+  return (
+    <details className="setup-guide">
+      <summary>
+        where do I get {plural ? "these" : "this"}? — step-by-step
+      </summary>
+      {type === "pcloud" ? (
+        <>
+          <ol>
+            <li>
+              Open{" "}
+              <a href="https://docs.pcloud.com/my_apps/" target="_blank" rel="noreferrer">
+                docs.pcloud.com/my_apps
+              </a>{" "}
+              → <strong>New app</strong>, and sign in with the pCloud account
+              whose storage you want to use.
+            </li>
+            <li>
+              Give it any name. Under <em>Redirect URIs</em> add exactly{" "}
+              <code>http://127.0.0.1:8422/</code> — pCloud checks this against
+              the registered value, so the port is fixed and the trailing
+              slash matters.
+            </li>
+            <li>
+              Copy both the <strong>Client ID</strong> and{" "}
+              <strong>Client secret</strong> into this form — pCloud is a
+              confidential client, so unlike Dropbox/OneDrive it needs the
+              secret too.
+            </li>
+          </ol>
+          <p className="muted">
+            Submitting opens a pCloud consent tab — approve, and scatterbox
+            stores everything in a visible <code>scatterbox/</code> folder at
+            your account root (chunks are encrypted before upload). Note pCloud
+            grants whole-account access; there is no app-folder sandbox, but
+            scatterbox only ever touches that one folder.
+          </p>
+        </>
+      ) : type === "dropbox" ? (
+        <>
+          <ol>
+            <li>
+              Open{" "}
+              <a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noreferrer">
+                dropbox.com/developers/apps
+              </a>{" "}
+              → <strong>Create app</strong>.
+            </li>
+            <li>
+              Choose <strong>Scoped access</strong>, then access type{" "}
+              <strong>App folder</strong> — scatterbox gets its own folder
+              under <code>Apps/</code> and can touch nothing else. Any name.
+            </li>
+            <li>
+              <em>Permissions</em> tab: tick{" "}
+              <code>files.content.read</code>, <code>files.content.write</code>{" "}
+              and <code>files.metadata.read</code>, then <strong>Submit</strong>.
+            </li>
+            <li>
+              <em>Settings</em> tab: under <em>OAuth 2 → Redirect URIs</em>{" "}
+              add exactly <code>http://127.0.0.1:8421/</code> — Dropbox
+              requires the URI registered verbatim, so the port is fixed and
+              the trailing slash matters.
+            </li>
+            <li>
+              Copy the <strong>App key</strong> into this form. No secret
+              needed (public client + PKCE), and "Development" status is fine
+              — you are the only user of this app.
+            </li>
+          </ol>
+          <p className="muted">
+            Submitting opens a Dropbox consent tab — sign in with the account
+            whose storage you want to use and approve. scatterbox can only
+            touch its own <code>Apps/&lt;app name&gt;/</code> folder (chunks
+            are encrypted before upload).
+          </p>
+        </>
+      ) : type === "gdrive" ? (
+        <>
+          <ol>
+            <li>
+              Open{" "}
+              <a href="https://console.cloud.google.com" target="_blank" rel="noreferrer">
+                console.cloud.google.com
+              </a>{" "}
+              and create (or pick) a project — any name works.
+            </li>
+            <li>
+              <em>APIs &amp; Services → Library</em>: search for{" "}
+              <strong>Google Drive API</strong> and enable it.
+            </li>
+            <li>
+              <em>APIs &amp; Services → OAuth consent screen</em>: choose{" "}
+              <strong>External</strong>, fill in the required app name and
+              email. Then — easy to miss, but required —{" "}
+              <strong>
+                add the Google account you'll sign in with under Test users
+              </strong>{" "}
+              (shown under <em>Audience</em> in the new console). Staying in
+              "Testing" mode is fine — you are the only user of this app.
+            </li>
+            <li>
+              <em>APIs &amp; Services → Credentials → Create credentials →
+              OAuth client ID</em>: application type{" "}
+              <strong>Desktop app</strong>. No redirect URI to configure —
+              desktop apps may use the loopback address out of the box.
+            </li>
+            <li>
+              Copy the <strong>Client ID</strong> and{" "}
+              <strong>Client secret</strong> it shows into this form.
+            </li>
+          </ol>
+          <p className="muted">
+            Submitting opens a Google consent tab — sign in with the account
+            whose storage you want to use and approve. scatterbox only asks
+            for the <code>drive.file</code> scope: it can see nothing but the
+            files it creates itself, in a visible <code>scatterbox/</code>{" "}
+            folder at your Drive root (chunks are encrypted before upload).
+          </p>
+          <p className="muted">
+            <strong>"Access blocked: … has not completed the Google
+            verification process" (Error 403: access_denied)</strong> means
+            the account you signed in with isn't on the app's test-user list.
+            No waiting or verification will fix it — verification is only for
+            publishing an app to the public. Go back to{" "}
+            <em>OAuth consent screen → Test users</em> (or <em>Audience</em>),
+            add that account, and submit here again — it works immediately.
+          </p>
+          <p className="muted">
+            If it fails with "no refresh token", revoke the app's earlier
+            consent at{" "}
+            <a href="https://myaccount.google.com/permissions" target="_blank" rel="noreferrer">
+              myaccount.google.com/permissions
+            </a>{" "}
+            and try again.
+          </p>
+        </>
+      ) : (
+        <>
+          <ol>
+            <li>
+              Open{" "}
+              <a href="https://entra.microsoft.com" target="_blank" rel="noreferrer">
+                entra.microsoft.com
+              </a>{" "}
+              → <em>App registrations</em> → <strong>New registration</strong>.
+            </li>
+            <li>
+              Any name; under <em>Supported account types</em> pick{" "}
+              <strong>Personal Microsoft accounts only</strong>.
+            </li>
+            <li>
+              Under <em>Redirect URI</em> select the platform{" "}
+              <strong>Public client/native (mobile &amp; desktop)</strong> and
+              enter <code>http://localhost</code>.
+            </li>
+            <li>
+              Register, then copy the{" "}
+              <strong>Application (client) ID</strong> from the Overview page
+              into this form. That's all — personal-account apps are public
+              clients, so there is no client secret.
+            </li>
+          </ol>
+          <p className="muted">
+            Submitting opens a Microsoft consent tab — sign in with the
+            personal account whose OneDrive you want to use and approve.
+            scatterbox only asks for the app-folder scope: it can touch
+            nothing outside its own <code>Apps/&lt;app name&gt;/</code> folder
+            in your OneDrive (chunks are encrypted before upload).
+          </p>
+          <p className="muted">
+            <strong>"The ability to create applications outside of a
+            directory has been deprecated"</strong> — personal Microsoft
+            accounts now need a free Entra directory (tenant) to hold the app
+            registration. Ignore the M365 Developer Program suggestion (it
+            only accepts Visual Studio Enterprise subscribers); instead sign
+            up at{" "}
+            <a href="https://azure.microsoft.com/free" target="_blank" rel="noreferrer">
+              azure.microsoft.com/free
+            </a>{" "}
+            with the same Microsoft account — a card is required for identity
+            verification but nothing is charged. That creates a "Default
+            Directory"; come back to <em>App registrations</em> inside it and
+            register as above. The directory only <em>hosts</em> the app —
+            with "Personal Microsoft accounts only" selected, scatterbox
+            still signs into your personal OneDrive exactly the same way.
+          </p>
+        </>
+      )}
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -353,6 +558,8 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="localfs">local folder</option>
           <option value="gdrive">Google Drive</option>
           <option value="onedrive">OneDrive</option>
+          <option value="dropbox">Dropbox</option>
+          <option value="pcloud">pCloud</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -361,19 +568,34 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         />
       </div>
       {type === "localfs" ? (
-        <input
-          placeholder="folder path on this machine (e.g. D:\scatterbox)"
-          value={root}
-          onChange={(e) => setRoot(e.target.value)}
-        />
+        <>
+          <input
+            placeholder="folder path on this machine (e.g. D:\scatterbox)"
+            value={root}
+            onChange={(e) => setRoot(e.target.value)}
+          />
+          <p className="muted small">
+            Any folder that's usually reachable works: a second disk, a USB
+            drive, a NAS/network mount. It is created if missing, and only
+            encrypted chunks land in it.
+          </p>
+        </>
       ) : (
         <>
           <input
-            placeholder="OAuth client id"
+            placeholder={
+              type === "gdrive"
+                ? "OAuth client id (…apps.googleusercontent.com)"
+                : type === "dropbox"
+                  ? "App key from the Dropbox App Console"
+                  : type === "pcloud"
+                    ? "Client ID from the pCloud App Console"
+                    : "application (client) id from Entra"
+            }
             value={clientId}
             onChange={(e) => setClientId(e.target.value)}
           />
-          {type === "gdrive" && (
+          {(type === "gdrive" || type === "pcloud") && (
             <input
               type="password"
               placeholder="OAuth client secret"
@@ -382,13 +604,19 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
             />
           )}
           <p className="muted small">
-            Needs your own (free) OAuth app —{" "}
-            {type === "gdrive"
-              ? "Google Cloud Console, Desktop app client"
-              : "Microsoft Entra, personal accounts, http://localhost redirect"}
-            . A consent tab will open in your browser; this form waits until
-            you finish there.
+            {
+              {
+                gdrive: "Google Drive",
+                onedrive: "OneDrive",
+                dropbox: "Dropbox",
+                pcloud: "pCloud",
+              }[type]
+            }{" "}
+            needs your own free OAuth app (a 5-minute, one-time setup per
+            account). Submitting opens a consent tab in your browser; this
+            form waits until you finish there.
           </p>
+          <OAuthGuide type={type} />
         </>
       )}
       <div className="form-row">

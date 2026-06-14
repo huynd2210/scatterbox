@@ -79,6 +79,20 @@ button.choice {
 }
 button.choice strong { font-size: 15px; }
 
+/* collapsible OAuth app setup walkthrough (provider form + recovery) */
+.setup-guide {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 12px;
+  font-size: 12px; text-align: left;
+}
+.setup-guide summary { cursor: pointer; color: var(--accent); }
+.setup-guide ol { margin: 8px 0 4px; padding-left: 18px; display: grid; gap: 6px; }
+.setup-guide p { margin: 8px 0 2px; }
+.setup-guide code {
+  font-family: ui-monospace, Consolas, monospace;
+  background: var(--bg-hover); padding: 0 4px; border-radius: 4px;
+}
+
 /* provider add form (wizard + providers tab) */
 .provider-form {
   display: flex; flex-direction: column; gap: 8px;

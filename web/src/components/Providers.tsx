@@ -44,7 +44,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       const id = prompt(`OAuth client id for ${p.name}`);
       if (!id) return;
       body.client_id = id;
-      if (p.type === "gdrive") {
+      if (p.type === "gdrive" || p.type === "pcloud") {
         body.client_secret = prompt("OAuth client secret") ?? undefined;
       }
     }
@@ -100,7 +100,10 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
           p={p}
           onRemove={() => remove(p)}
           onReauth={
-            p.type === "gdrive" || p.type === "onedrive"
+            p.type === "gdrive" ||
+            p.type === "onedrive" ||
+            p.type === "dropbox" ||
+            p.type === "pcloud"
               ? () => reauth(p)
               : undefined
           }

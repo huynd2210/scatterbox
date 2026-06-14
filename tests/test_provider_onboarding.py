@@ -115,6 +115,45 @@ def test_onedrive_onboarding_has_no_client_secret(env, stub_oauth, monkeypatch):
     )
     assert stub_oauth["client_secret"] is None
     assert "Files.ReadWrite.AppFolder" in stub_oauth["scopes"]
+    assert stub_oauth["fixed_port"] is None  # any loopback port matches
+
+
+def test_dropbox_onboarding_pins_the_redirect_port(env, stub_oauth, monkeypatch):
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: StubProvider())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "db", "--type", "dropbox", "--client-id", "appkey"],
+        )
+    )
+    assert stub_oauth["client_secret"] is None  # public client + PKCE
+    assert "files.content.write" in stub_oauth["scopes"]
+    # Dropbox checks redirect URIs against exact registered values
+    assert stub_oauth["fixed_port"] == 8421
+    assert stub_oauth["extra_auth_params"] == {"token_access_type": "offline"}
+
+
+def test_pcloud_onboarding_is_confidential_and_non_refreshing(env, stub_oauth, monkeypatch):
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: StubProvider())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "pc", "--type", "pcloud", "--client-id", "appid"],
+            input="shh\n",  # confidential client: secret prompt, like gdrive
+        )
+    )
+    assert stub_oauth["client_secret"] == "shh"
+    assert stub_oauth["scopes"] == ""  # pCloud has no scope parameter
+    # pCloud pins its redirect port, issues no refresh token, and region-resolves
+    assert stub_oauth["fixed_port"] == 8422
+    assert stub_oauth["require_refresh_token"] is False
+    assert stub_oauth["token_url_resolver"] is not None
+    # folder id learned at onboarding lands in the register row
+    home = env / "home"
+    reg = Register(home / "register.db")
+    config = json.loads(reg.get_provider_by_name("pc")["config"])
+    reg.close()
+    assert config["folder_id"] == "fold42"
 
 
 def test_failed_connection_test_rolls_back_the_secret(env, stub_oauth, monkeypatch):

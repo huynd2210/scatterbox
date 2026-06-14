@@ -8,6 +8,8 @@ To run, onboard a provider into a dedicated scatterbox home first:
     set SCATTERBOX_PASSPHRASE=...
     set SCATTERBOX_TEST_GDRIVE=gd      (the provider's registered name)
     set SCATTERBOX_TEST_ONEDRIVE=od
+    set SCATTERBOX_TEST_DROPBOX=db
+    set SCATTERBOX_TEST_PCLOUD=pc
     uv run pytest tests/test_real_providers.py -v
 
 Each test stores a small file pinned to that single provider (replicas=1),
@@ -80,3 +82,19 @@ def test_gdrive_real_roundtrip(tmp_path):
 )
 def test_onedrive_real_roundtrip(tmp_path):
     _roundtrip(os.environ["SCATTERBOX_TEST_ONEDRIVE"], tmp_path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCATTERBOX_TEST_DROPBOX"),
+    reason="set SCATTERBOX_TEST_DROPBOX=<provider name> to run against Dropbox",
+)
+def test_dropbox_real_roundtrip(tmp_path):
+    _roundtrip(os.environ["SCATTERBOX_TEST_DROPBOX"], tmp_path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCATTERBOX_TEST_PCLOUD"),
+    reason="set SCATTERBOX_TEST_PCLOUD=<provider name> to run against pCloud",
+)
+def test_pcloud_real_roundtrip(tmp_path):
+    _roundtrip(os.environ["SCATTERBOX_TEST_PCLOUD"], tmp_path)

@@ -47,16 +47,24 @@ def test_register_adapter_rejects_duplicates():
 
 def test_unknown_type_lists_known_types():
     with pytest.raises(ScatterboxError, match="known: .*gdrive.*localfs.*onedrive"):
-        create_provider("dropbox", {})
+        create_provider("megaupload", {})
 
 
 def test_builtin_registry_shape():
-    assert known_types() == ["gdrive", "localfs", "onedrive"]  # chaos hidden
+    # chaos hidden
+    assert known_types() == ["dropbox", "gdrive", "localfs", "onedrive", "pcloud"]
     assert "chaos" in known_types(user_addable_only=False)
     assert requires_secrets("gdrive") and requires_secrets("onedrive")
+    assert requires_secrets("dropbox") and requires_secrets("pcloud")
     assert not requires_secrets("localfs")
     # OAuth-onboarded types expose their endpoints via the registry
     from scatterbox.onboarding import oauth_types
 
-    assert set(oauth_types()) == {"gdrive", "onedrive"}
+    assert set(oauth_types()) == {"gdrive", "onedrive", "dropbox", "pcloud"}
     assert oauth_types()["gdrive"].AUTH_URL.startswith("https://accounts.google.com")
+    # Dropbox verifies redirect URIs exactly -> the loopback port is pinned
+    assert oauth_types()["dropbox"].REDIRECT_PORT == 8421
+    # pCloud issues a non-expiring token (no refresh) and also pins its port
+    pcloud = oauth_types()["pcloud"]
+    assert pcloud.REQUIRE_REFRESH_TOKEN is False
+    assert pcloud.REDIRECT_PORT == 8422

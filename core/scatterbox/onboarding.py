@@ -101,8 +101,8 @@ def onboard_oauth_provider(
     try:
         instance = create_provider(type_, config, vault)
         quota = asyncio.run(instance.quota())  # connection test
-        if type_ == "gdrive":
-            asyncio.run(instance.prepare())  # create the scatterbox/ folder now
+        if hasattr(instance, "prepare"):  # gdrive/pcloud: create scatterbox/ now
+            asyncio.run(instance.prepare())
             config.update(instance.learned_config())
         register.add_provider(name, type_, config)
     except ScatterboxError:
@@ -132,7 +132,12 @@ def acquire_oauth_blob(
         scopes=mod.SCOPES,
         client_secret=client_secret,
         extra_auth_params=getattr(mod, "EXTRA_AUTH_PARAMS", None),
+        fixed_port=getattr(mod, "REDIRECT_PORT", None),
         open_browser=open_browser,
+        # pCloud-class backends declare these; the others take the defaults
+        # (refresh token required, single fixed token endpoint).
+        require_refresh_token=getattr(mod, "REQUIRE_REFRESH_TOKEN", True),
+        token_url_resolver=getattr(mod, "resolve_token_url", None),
     )
 
 

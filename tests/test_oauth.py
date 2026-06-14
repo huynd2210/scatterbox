@@ -132,6 +132,28 @@ def test_refresh_failure_raises_with_guidance():
         asyncio.run(tm.access_token())
 
 
+def static_blob():
+    """A pCloud-style token: no expiry, no refresh token."""
+    return {"access_token": "tok-static", "client_id": "cid", "token_url": TOKEN_URL}
+
+
+def test_static_token_is_served_without_refresh():
+    transport, calls = token_endpoint([])
+    secrets = FakeSecrets(s=static_blob())
+    tm = oauth.TokenManager(secrets, "s", transport=transport)
+    assert asyncio.run(tm.access_token()) == "tok-static"
+    assert calls == [] and secrets.writes == 0
+
+
+def test_static_token_rejection_demands_reauth():
+    # A 401 on a non-refreshable token forces a refresh that can't happen —
+    # only re-consent fixes it, and the error must say so.
+    secrets = FakeSecrets(s=static_blob())
+    tm = oauth.TokenManager(secrets, "s")
+    with pytest.raises(ScatterboxError, match="provider reauth"):
+        asyncio.run(tm.refresh(failed_token="tok-static"))
+
+
 # -- loopback flow -------------------------------------------------------------
 
 
@@ -233,5 +255,76 @@ def test_loopback_flow_requires_refresh_token(monkeypatch):
             token_url=TOKEN_URL,
             client_id="cid",
             scopes="s",
+            timeout_s=10,
+        )
+
+
+def test_loopback_flow_non_expiring_token_with_region(monkeypatch):
+    """pCloud path: no refresh token / no expiry, the token endpoint and the
+    persisted api_base are resolved from the redirect's region params, and an
+    empty scope is omitted from the consent URL."""
+    seen = {}
+
+    def fake_open(url):
+        params = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+        seen["auth_params"] = params
+        httpx.get(
+            params["redirect_uri"]
+            + "?"
+            + urllib.parse.urlencode(
+                {
+                    "code": "authcode",
+                    "state": params["state"],
+                    "hostname": "eapi.pcloud.test",
+                    "locationid": "2",
+                }
+            )
+        )
+        return True
+
+    def fake_post(url, data=None):
+        seen["token_url"] = url
+        return httpx.Response(
+            200,
+            json={"access_token": "at", "token_type": "bearer", "result": 0},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(oauth.webbrowser, "open", fake_open)
+    monkeypatch.setattr(oauth.httpx, "post", fake_post)
+
+    def resolver(redirect):
+        host = redirect["hostname"]
+        return f"https://{host}/oauth2_token", {"api_base": f"https://{host}"}
+
+    blob_out = oauth.run_loopback_flow(
+        auth_url="https://my.pcloud.test/oauth2/authorize",
+        token_url="https://api.pcloud.test/oauth2_token",  # default, overridden
+        client_id="cid",
+        scopes="",
+        client_secret="shh",
+        require_refresh_token=False,
+        token_url_resolver=resolver,
+        timeout_s=10,
+    )
+    assert blob_out["access_token"] == "at"
+    assert blob_out["api_base"] == "https://eapi.pcloud.test"
+    assert blob_out["client_secret"] == "shh"
+    assert "expires_at" not in blob_out and "refresh_token" not in blob_out
+    assert seen["token_url"] == "https://eapi.pcloud.test/oauth2_token"  # region-resolved
+    assert "scope" not in seen["auth_params"]  # empty scope omitted
+
+
+def test_loopback_flow_surfaces_pcloud_result_error(monkeypatch):
+    _fake_browser_and_exchange(
+        monkeypatch, token_json={"result": 2000, "error": "Invalid 'client_secret'."}
+    )
+    with pytest.raises(ScatterboxError, match="result 2000"):
+        oauth.run_loopback_flow(
+            auth_url="https://auth.example/authorize",
+            token_url=TOKEN_URL,
+            client_id="cid",
+            scopes="s",
+            require_refresh_token=False,
             timeout_s=10,
         )

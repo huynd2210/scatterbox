@@ -24,9 +24,11 @@ from scatterbox.providers.base import (
     Transform,
 )
 from scatterbox.providers.chaos import ChaosProvider
+from scatterbox.providers.dropbox import DropboxProvider
 from scatterbox.providers.gdrive import GDriveProvider
 from scatterbox.providers.localfs import LocalFSProvider
 from scatterbox.providers.onedrive import OneDriveProvider
+from scatterbox.providers.pcloud import PCloudProvider
 from scatterbox.vault import SecretStore
 
 __all__ = [
@@ -39,6 +41,8 @@ __all__ = [
     "ChaosProvider",
     "GDriveProvider",
     "OneDriveProvider",
+    "DropboxProvider",
+    "PCloudProvider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -118,13 +122,40 @@ def _onedrive_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _dropbox_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return DropboxProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
+def _pcloud_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return PCloudProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        folder_id=config.get("folder_id"),
+        api_base=config.get("api_base"),
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
+    from scatterbox.providers import dropbox as dropbox_mod
     from scatterbox.providers import gdrive as gdrive_mod
     from scatterbox.providers import onedrive as onedrive_mod
+    from scatterbox.providers import pcloud as pcloud_mod
 
-    return {"gdrive": gdrive_mod, "onedrive": onedrive_mod}[name]
+    return {
+        "gdrive": gdrive_mod,
+        "onedrive": onedrive_mod,
+        "dropbox": dropbox_mod,
+        "pcloud": pcloud_mod,
+    }[name]
 
 
 ADAPTERS: dict[str, AdapterSpec] = {
@@ -139,6 +170,16 @@ ADAPTERS: dict[str, AdapterSpec] = {
         factory=_onedrive_factory,
         requires_secrets=True,
         oauth_module=_oauth_module("onedrive"),
+    ),
+    "dropbox": AdapterSpec(
+        factory=_dropbox_factory,
+        requires_secrets=True,
+        oauth_module=_oauth_module("dropbox"),
+    ),
+    "pcloud": AdapterSpec(
+        factory=_pcloud_factory,
+        requires_secrets=True,
+        oauth_module=_oauth_module("pcloud"),
     ),
     # Future backends slot in here (see providers/_template.py):
     #   "discord":  small max_object_bytes (~10 MB), reliability_prior 0.5,

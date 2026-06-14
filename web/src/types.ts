@@ -99,7 +99,7 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive";
+  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud";
   root?: string;
   client_id?: string;
   client_secret?: string;

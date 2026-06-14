@@ -60,17 +60,6 @@ the complete feature reference (every command, endpoint, policy field, and
 durability rule) is [docs/FEATURES.md](docs/FEATURES.md); current work is
 tracked in [TASKS.md](TASKS.md).
 
-## Status
-
-| Phase | | |
-|---|---|---|
-| 0 | Core pipeline + CLI (chunk/encrypt/hash, localfs mock, put/get/ls/rm) | ✅ |
-| 1 | Replication + repair (placement engine, scrubber, chaos-tested healing) | ✅ |
-| 2 | Real providers + vault (Google Drive, OneDrive, OAuth, secret vault) | ✅ code complete — real-credential gates pending |
-| 3 | Daemon + web explorer (FastAPI, React, virtualized listing) | ✅ |
-| 4 | Portability + recovery (export/import, register snapshots to providers) | ✅ |
-| 5 | Policies, erasure coding (+ adapter registry; exotic adapters deferred) | ✅ |
-
 ## Install
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -145,6 +134,16 @@ version (details: TASKS.md §7):
 - **OneDrive:** register an app at entra.microsoft.com for **personal
   Microsoft accounts**, add `http://localhost` as a *Mobile and desktop*
   redirect URI. No client secret (public client + PKCE).
+- **Dropbox:** create a **Scoped access / App folder** app at
+  dropbox.com/developers/apps, enable the `files.content.*` and
+  `files.metadata.read` permissions, and register the redirect URI
+  `http://127.0.0.1:8421/` exactly (Dropbox allows no random loopback
+  ports). No client secret (public client + PKCE).
+- **pCloud:** create an app at docs.pcloud.com/my_apps and register the
+  redirect URI `http://127.0.0.1:8422/` exactly. Needs the client **secret**
+  too (confidential client). Works with both US and EU accounts — the region
+  is detected during consent. pCloud's access token never expires and there
+  is no refresh token, so a revoked token is fixed with `provider reauth`.
 
 Then either add them in the web UI (providers tab → add provider — a
 consent tab opens in your browser) or via the CLI:
@@ -152,12 +151,17 @@ consent tab opens in your browser) or via the CLI:
 ```sh
 uv run scatterbox provider add gd --type gdrive     # prompts id/secret, opens browser
 uv run scatterbox provider add od --type onedrive   # prompts id, opens browser
+uv run scatterbox provider add db --type dropbox    # prompts app key, opens browser
+uv run scatterbox provider add pc --type pcloud     # prompts id/secret, opens browser
 uv run scatterbox provider list                     # real quota, confidence-labelled
 ```
 
 Tokens land in the encrypted vault, never in the register. Scopes are
-minimal: scatterbox can only touch files it created (`drive.file` / the
-OneDrive app folder) — never the rest of your account.
+minimal where the provider allows it: scatterbox can only touch files it
+created (`drive.file` / the OneDrive and Dropbox app folders) — never the
+rest of your account. pCloud is the exception — it grants whole-account
+access — so scatterbox confines itself to a single visible `scatterbox/`
+folder there (and every chunk is encrypted before upload regardless).
 
 Per-instance limits are user-configurable and always respected:
 

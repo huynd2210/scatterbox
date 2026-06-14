@@ -301,14 +301,15 @@ def _onboard_oauth(
     if client_id is None:
         typer.echo(
             f"You need your own OAuth client app for {type_} "
-            "(Google Cloud Console / Microsoft Entra portal)."
+            "(Google Cloud Console / Microsoft Entra portal / Dropbox or "
+            "pCloud App Console)."
         )
         client_id = typer.prompt("OAuth client id")
     client_secret = None
-    if type_ == "gdrive":
-        # Google installed apps are issued a client secret (not actually
-        # confidential, but required at the token endpoint). Microsoft
-        # public clients have none.
+    if type_ in ("gdrive", "pcloud"):
+        # Confidential clients: a client secret is required at the token
+        # endpoint (Google installed apps and pCloud both issue one).
+        # Microsoft and Dropbox public clients have none.
         client_secret = typer.prompt("OAuth client secret", hide_input=True)
 
     quota = onboarding.onboard_oauth_provider(
@@ -331,11 +332,11 @@ def _onboard_oauth(
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
-    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (gdrive/onedrive); prompted if omitted.")] = None,
+    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     no_browser: Annotated[bool, typer.Option("--no-browser", help="Print the consent URL instead of opening a browser.")] = False,
 ) -> None:
     """Register a provider instance, running its credential flow if needed."""
@@ -403,7 +404,7 @@ def provider_remove(
 def provider_reauth(
     name: Annotated[str, typer.Argument()],
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id; reused from the previous tokens if omitted.")] = None,
-    client_secret: Annotated[Optional[str], typer.Option(help="OAuth client secret (gdrive).")] = None,
+    client_secret: Annotated[Optional[str], typer.Option(help="OAuth client secret (gdrive/pcloud).")] = None,
     no_browser: Annotated[bool, typer.Option("--no-browser")] = False,
 ) -> None:
     """Re-run the OAuth consent for an existing provider (expired/revoked
@@ -648,9 +649,9 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
-    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (gdrive/onedrive); prompted if omitted.")] = None,
+    client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
     no_browser: Annotated[bool, typer.Option("--no-browser")] = False,
     force: Annotated[bool, typer.Option("--force", help="Overwrite an existing home.")] = False,
@@ -675,7 +676,7 @@ def recover(
                 client_id = typer.prompt("OAuth client id")
             client_secret = (
                 typer.prompt("OAuth client secret", hide_input=True)
-                if type_ == "gdrive"
+                if type_ in ("gdrive", "pcloud")
                 else None
             )
             blob = onboarding.acquire_oauth_blob(

@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-from dataclasses import dataclass
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
@@ -88,19 +88,43 @@ def run_loopback_flow(
     scopes: str,
     client_secret: str | None = None,
     extra_auth_params: dict[str, str] | None = None,
+    fixed_port: int | None = None,
     open_browser: bool = True,
     timeout_s: float = _FLOW_TIMEOUT_S,
+    require_refresh_token: bool = True,
+    token_url_resolver: Callable[[dict[str, str]], tuple[str, dict[str, Any]]]
+    | None = None,
 ) -> dict[str, Any]:
     """Interactive authorization-code + PKCE flow; returns a token blob.
 
     Binds a throwaway HTTP server to 127.0.0.1:<random port> as the redirect
     target, sends the user's browser to the consent page, waits for the
     redirect, exchanges the code. Raises ScatterboxError on denial/timeout.
+
+    fixed_port pins the loopback port: providers that verify the redirect
+    URI against exact pre-registered values (Dropbox) can't use a random
+    port — the adapter module declares REDIRECT_PORT and the user registers
+    that one URI once.
+
+    require_refresh_token=False is for backends whose access tokens never
+    expire and that issue no refresh token (pCloud): the blob is then stored
+    without an expires_at, and the TokenManager serves it forever.
+
+    token_url_resolver, when given, is called with the redirect's query
+    params and returns (token_url, blob_extra): it lets region-sharded
+    backends (pCloud's US/EU data centers) pick the token endpoint and record
+    the per-account API host discovered only at consent time.
     """
     verifier, challenge = _pkce_pair()
     state = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode()
 
-    server = HTTPServer(("127.0.0.1", 0), _RedirectCatcher)
+    try:
+        server = HTTPServer(("127.0.0.1", fixed_port or 0), _RedirectCatcher)
+    except OSError as exc:
+        raise ScatterboxError(
+            f"cannot listen on the OAuth redirect port {fixed_port}: {exc} — "
+            "close whatever is using it and retry"
+        )
     _RedirectCatcher.result = {}
     redirect_uri = f"http://127.0.0.1:{server.server_port}/"
 
@@ -108,12 +132,13 @@ def run_loopback_flow(
         "response_type": "code",
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-        "scope": scopes,
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
         **(extra_auth_params or {}),
     }
+    if scopes:  # pCloud has no scope parameter (access is whole-account)
+        params["scope"] = scopes
     url = auth_url + "?" + urllib.parse.urlencode(params)
 
     # Serve exactly one request (the redirect) on a helper thread while this
@@ -138,6 +163,12 @@ def run_loopback_flow(
             f"authorization failed: {result.get('error', 'no code returned')}"
         )
 
+    # Region-sharded backends derive the token endpoint (and extra non-secret
+    # blob keys, e.g. the per-account API host) from the redirect params.
+    blob_extra: dict[str, Any] = {}
+    if token_url_resolver is not None:
+        token_url, blob_extra = token_url_resolver(result)
+
     data = {
         "grant_type": "authorization_code",
         "code": result["code"],
@@ -153,7 +184,15 @@ def run_loopback_flow(
             f"token exchange failed ({resp.status_code}): {resp.text[:200]}"
         )
     tok = resp.json()
-    if "refresh_token" not in tok:
+    if tok.get("result"):  # pCloud-style API error: HTTP 200 + nonzero result
+        raise ScatterboxError(
+            f"token exchange failed (result {tok['result']}): {tok.get('error', '')}"
+        )
+    if "access_token" not in tok:
+        raise ScatterboxError(
+            f"token exchange returned no access token: {resp.text[:200]}"
+        )
+    if require_refresh_token and "refresh_token" not in tok:
         # Without one we'd lose access within the hour; for Google this means
         # consent was granted before without prompt=consent, for MS a missing
         # offline_access scope. Fail now, not at 3 a.m. during a scrub.
@@ -163,11 +202,19 @@ def run_loopback_flow(
         )
     blob: dict[str, Any] = {
         "access_token": tok["access_token"],
-        "refresh_token": tok["refresh_token"],
-        "expires_at": time.time() + float(tok.get("expires_in", 3600)),
         "client_id": client_id,
         "token_url": token_url,
+        **blob_extra,
     }
+    if "refresh_token" in tok:
+        blob["refresh_token"] = tok["refresh_token"]
+    # A non-expiring token (pCloud) is stored without expires_at; the
+    # TokenManager then serves it forever and never tries to refresh.
+    expires_in = tok.get("expires_in")
+    if expires_in is not None:
+        blob["expires_at"] = time.time() + float(expires_in)
+    elif require_refresh_token:
+        blob["expires_at"] = time.time() + 3600.0  # refreshable but unstated
     if client_secret:
         blob["client_secret"] = client_secret
     return blob
@@ -191,6 +238,10 @@ class TokenManager:
 
     async def access_token(self) -> str:
         """A currently-valid bearer token, refreshing if (nearly) expired."""
+        # A token stored without an expiry never refreshes (pCloud: tokens
+        # don't expire and there is no refresh token to redeem).
+        if "expires_at" not in self._blob:
+            return self._blob["access_token"]
         if time.time() < self._blob["expires_at"] - _EXPIRY_SKEW_S:
             return self._blob["access_token"]
         return await self.refresh()
@@ -200,6 +251,14 @@ class TokenManager:
         server may have revoked the token regardless of its local expiry, so
         a forced refresh must not be satisfied by the not-yet-expired check."""
         async with self._lock:
+            if "refresh_token" not in self._blob:
+                # Non-expiring, non-refreshable token (pCloud) that the server
+                # nonetheless rejected — only re-consent can fix it.
+                raise ScatterboxError(
+                    f"the access token for {self._name} was rejected and it "
+                    "has no refresh token (pCloud issues non-expiring tokens) "
+                    "— re-run 'scatterbox provider reauth' to re-authorize"
+                )
             # Another task may have refreshed while we waited on the lock.
             current = self._blob["access_token"]
             if current != failed_token and time.time() < self._blob[
