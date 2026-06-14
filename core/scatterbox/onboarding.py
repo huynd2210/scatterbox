@@ -108,17 +108,22 @@ def onboard_secret_provider(
     type_: str,
     *,
     blob: dict,
+    extra_config: dict | None = None,
     max_object_bytes: int | None = None,
     capacity_bytes: int | None = None,
 ) -> Quota:
     """Onboard a secret-requiring backend whose credential is NOT acquired
-    through the OAuth loopback flow (Koofr's app password): the caller builds
-    the credential blob with whatever prompt that backend needs, and this
-    stores it → connection-tests → registers the row, with the same rollback
-    as the OAuth path. Returns the tested quota."""
+    through the OAuth loopback flow (Koofr's app password, an S3 access
+    key/secret): the caller builds the credential blob with whatever prompt
+    that backend needs, and this stores it → connection-tests → registers the
+    row, with the same rollback as the OAuth path. Returns the tested quota.
+
+    extra_config carries non-secret register config the adapter needs but does
+    not discover at runtime (an S3 backend's account id / bucket / endpoint);
+    it is merged into the register row, never the vault."""
     _ensure_name_free(register, name)
     return _store_test_register(
-        register, vault, name, type_, blob,
+        register, vault, name, type_, blob, extra_config=extra_config,
         max_object_bytes=max_object_bytes, capacity_bytes=capacity_bytes,
     )
 
@@ -130,15 +135,22 @@ def _store_test_register(
     type_: str,
     blob: dict,
     *,
+    extra_config: dict | None = None,
     max_object_bytes: int | None,
     capacity_bytes: int | None,
 ) -> Quota:
     """Shared onboarding tail: credential into the vault → live connection
     test → register row, rolling the secret back if anything fails after it
-    was stored. Used by both the OAuth and app-password onboarding paths."""
+    was stored. Used by both the OAuth and app-password onboarding paths.
+    extra_config (non-secret, e.g. an S3 bucket/account) is merged into the
+    register row alongside the secret reference."""
     secret_name = f"provider:{name}"
     vault.set_secret(secret_name, blob)
-    config = {"secret": secret_name, **_limits(max_object_bytes, capacity_bytes)}
+    config = {
+        "secret": secret_name,
+        **(extra_config or {}),
+        **_limits(max_object_bytes, capacity_bytes),
+    }
     try:
         instance = create_provider(type_, config, vault)
         quota = asyncio.run(instance.quota())  # connection test

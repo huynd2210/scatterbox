@@ -82,7 +82,13 @@ the token blob; errors arrive as HTTP-200 `result` codes, not status codes),
 `koofr` (visible `scatterbox/` folder in the account's primary mount, single
 multipart uploads, path-addressed objects; authenticates with a self-serve
 app password over HTTP Basic — not OAuth — which is static, so a rejected one
-is a re-auth rather than a refresh).
+is a re-auth rather than a refresh),
+`r2` (Cloudflare R2, S3-compatible: objects under a `scatterbox/` key prefix in
+a bucket, single-PUT uploads, key-addressed objects; authenticates with an S3
+access key/secret signed with AWS SigV4 — not OAuth — static, so a rejected
+key is a re-auth rather than a refresh. The account id + bucket are non-secret
+register config; no free-space API, so quota is the configured cap if set
+('estimated') else 'unknown'. The shared S3 core lives in `providers/_s3.py`).
 `chaos` exists for tests only (failure injection: 404s, corruption,
 latency, hard-kill).
 
@@ -282,7 +288,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `get VPATH LOCAL` | Restore byte-identically |
 | `ls [VPATH]`, `status VPATH`, `mv SRC DST`, `rm VPATH` | Browse / health / move / delete |
 | `scrub [--full --repair --probe-limit --deep-budget-bytes]` | Verify + heal |
-| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr …` | Onboard (OAuth flow for cloud types; app password for koofr) |
+| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2 …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2) |
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |

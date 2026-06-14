@@ -198,6 +198,40 @@ def test_koofr_onboarding_stores_a_basic_app_password(env, monkeypatch):
     assert "app-pw-123" not in row["config"]  # the secret never hits the register
 
 
+def test_r2_onboarding_stores_keys_in_vault_and_bucket_in_register(env, monkeypatch):
+    """Cloudflare R2 is secret-backed but not OAuth: the CLI prompts for the
+    account id + bucket (non-secret) and the S3 access key/secret (vault), and
+    registers a row whose config carries the bucket but never the secret."""
+
+    class R2Stub:
+        async def quota(self):
+            return Quota(total_bytes=None, used_bytes=0, confidence="unknown")
+
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: R2Stub())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "r2", "--type", "r2"],
+            input="acct123\nmybucket\nAKIDXYZ\nSECRETXYZ\n",  # account, bucket, key, secret
+        )
+    )
+    home = env / "home"
+    v = unlock_vault(home / "vault.json", PASS)
+    blob = v.get_secret("provider:r2")
+    # only the S3 key/secret are stored, and nothing OAuth-shaped
+    assert blob == {"access_key_id": "AKIDXYZ", "secret_access_key": "SECRETXYZ"}
+    assert "refresh_token" not in blob and "expires_at" not in blob
+    reg = Register(home / "register.db")
+    row = reg.get_provider_by_name("r2")
+    config = json.loads(row["config"])
+    reg.close()
+    assert row["type"] == "r2"
+    assert config["secret"] == "provider:r2"
+    # non-secret location lands in the register (extra_config), the secret never
+    assert config["account_id"] == "acct123" and config["bucket"] == "mybucket"
+    assert "SECRETXYZ" not in row["config"]
+
+
 def test_failed_connection_test_rolls_back_the_secret(env, stub_oauth, monkeypatch):
     monkeypatch.setattr(
         onboarding,

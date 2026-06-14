@@ -370,10 +370,64 @@ def _onboard_koofr(
     typer.echo(f"added provider {name} (koofr{free})")
 
 
+def _prompt_r2_blob() -> dict:
+    """Prompt for Cloudflare R2's S3 access key pair and build the vault blob.
+
+    R2 has no OAuth: you create an R2 API token in the Cloudflare dashboard,
+    which yields an S3-style Access Key ID + Secret Access Key. Only the
+    key/secret are secret (stored in the vault); the account id and bucket are
+    prompted separately as non-secret config. Reused by add/reauth/recover."""
+    from scatterbox.providers.r2 import credential_blob
+
+    typer.echo(
+        "Cloudflare R2 uses an S3 API token (dashboard -> R2 -> Manage R2 API "
+        "Tokens). Paste the token's Access Key ID and Secret Access Key."
+    )
+    access_key_id = typer.prompt("R2 Access Key ID")
+    secret_access_key = typer.prompt("R2 Secret Access Key", hide_input=True)
+    return credential_blob(access_key_id, secret_access_key)
+
+
+def _prompt_r2_location() -> dict:
+    """Prompt for R2's non-secret config (Cloudflare account id + bucket) — the
+    register config that, together with the key/secret, locates the bucket.
+    Reused by add and cold recovery."""
+    account_id = typer.prompt("Cloudflare account id")
+    bucket = typer.prompt("R2 bucket name")
+    return {"account_id": account_id, "bucket": bucket}
+
+
+def _onboard_r2(
+    register: Register,
+    name: str,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> None:
+    """CLI front-end for Cloudflare R2 (S3 access key) onboarding: prompt here,
+    shared store/test/register flow in scatterbox.onboarding."""
+    location = _prompt_r2_location()
+    blob = _prompt_r2_blob()
+    v = _unlock()
+    quota = onboarding.onboard_secret_provider(
+        register,
+        v,
+        name,
+        "r2",
+        blob=blob,
+        extra_config=location,
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
+    )
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} (r2{free})")
+
+
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
@@ -416,6 +470,16 @@ def provider_add(
             else:
                 _fail(f"provider {name!r} already exists")
             _onboard_koofr(register, name, max_object_bytes, capacity_bytes)
+        elif type_ == "r2":
+            # S3 access-key backend (not OAuth): its own credential prompt, no
+            # browser consent. Fail on a duplicate name before prompting.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_r2(register, name, max_object_bytes, capacity_bytes)
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
     except ScatterboxError as exc:
@@ -464,11 +528,12 @@ def provider_reauth(
     register = _open_register()
     try:
         v = _unlock()
-        if register.get_provider_by_name(name)["type"] == "koofr":
-            # App-password backend: re-prompt for the credential, no browser.
-            quota = onboarding.update_provider_secret(
-                register, v, name, _prompt_koofr_blob()
-            )
+        ptype = register.get_provider_by_name(name)["type"]
+        if ptype in ("koofr", "r2"):
+            # Secret backends (no browser): re-prompt for just the credential —
+            # the R2 account id/bucket in the register row are unchanged.
+            blob = _prompt_koofr_blob() if ptype == "koofr" else _prompt_r2_blob()
+            quota = onboarding.update_provider_secret(register, v, name, blob)
         else:
             quota = onboarding.reauth_provider(
                 register,
@@ -707,7 +772,7 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
@@ -752,6 +817,15 @@ def recover(
             blob = _prompt_koofr_blob()
             provider = create_provider(
                 "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+            )
+        elif type_ == "r2":
+            # S3 access-key backend: prompt for account id + bucket (to locate
+            # the snapshot) and the key/secret, then recover and adopt.
+            location = _prompt_r2_location()
+            blob = _prompt_r2_blob()
+            provider = create_provider(
+                "r2", {"secret": "recovery", **location},
+                vault.MemorySecretStore(recovery=blob),
             )
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")

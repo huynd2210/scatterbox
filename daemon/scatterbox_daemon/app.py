@@ -253,6 +253,24 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 provider = create_provider(
                     "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
                 )
+            elif type_ == "r2":
+                from scatterbox.providers.r2 import credential_blob
+
+                access_key_id = (body.get("access_key_id") or "").strip()
+                secret_access_key = body.get("secret_access_key") or ""
+                account_id = (body.get("account_id") or "").strip()
+                bucket = (body.get("bucket") or "").strip()
+                if not (access_key_id and secret_access_key and account_id and bucket):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="R2 account id, bucket, access key id and secret access key required",
+                    )
+                blob = credential_blob(access_key_id, secret_access_key)
+                provider = create_provider(
+                    "r2",
+                    {"secret": "recovery", "account_id": account_id, "bucket": bucket},
+                    vault.MemorySecretStore(recovery=blob),
+                )
             else:
                 raise HTTPException(
                     status_code=400,
@@ -295,7 +313,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             # and sqlite must not cross threads
             reg = Register(state.home / "register.db")
             try:
-                if reg.get_provider_by_name(name)["type"] == "koofr":
+                ptype = reg.get_provider_by_name(name)["type"]
+                if ptype == "koofr":
                     from scatterbox.providers.koofr import credential_blob
 
                     email = (body.get("email") or "").strip()
@@ -306,6 +325,21 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         )
                     return onboarding.update_provider_secret(
                         reg, state.vault, name, credential_blob(email, app_password)
+                    )
+                if ptype == "r2":
+                    from scatterbox.providers.r2 import credential_blob
+
+                    access_key_id = (body.get("access_key_id") or "").strip()
+                    secret_access_key = body.get("secret_access_key") or ""
+                    if not access_key_id or not secret_access_key:
+                        raise ScatterboxError(
+                            "R2 access key id and secret access key required"
+                        )
+                    return onboarding.update_provider_secret(
+                        reg,
+                        state.vault,
+                        name,
+                        credential_blob(access_key_id, secret_access_key),
                     )
                 return onboarding.reauth_provider(
                     reg,
@@ -762,6 +796,41 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         reg.close()
 
                 await asyncio.to_thread(run_koofr_onboarding)
+            elif type_ == "r2":
+                _require_unlocked(state)
+                from scatterbox.providers.r2 import credential_blob
+
+                access_key_id = (body.get("access_key_id") or "").strip()
+                secret_access_key = body.get("secret_access_key") or ""
+                account_id = (body.get("account_id") or "").strip()
+                bucket = (body.get("bucket") or "").strip()
+                if not (access_key_id and secret_access_key and account_id and bucket):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="R2 account id, bucket, access key id and secret access key required",
+                    )
+                blob = credential_blob(access_key_id, secret_access_key)
+                extra_config = {"account_id": account_id, "bucket": bucket}
+
+                def run_r2_onboarding() -> None:
+                    # Own register connection on the worker thread (the shared
+                    # onboarding flow does its connection test via asyncio.run,
+                    # which cannot run inside this event loop).
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_secret_provider(
+                            reg,
+                            state.vault,
+                            name,
+                            "r2",
+                            blob=blob,
+                            extra_config=extra_config,
+                            **limits,
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_r2_onboarding)
             else:
                 raise HTTPException(
                     status_code=400,
