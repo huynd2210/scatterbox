@@ -370,10 +370,67 @@ def _onboard_koofr(
     typer.echo(f"added provider {name} (koofr{free})")
 
 
+def _prompt_oracle_blob() -> dict:
+    """Prompt for Oracle's Customer Secret Key (an S3 access key pair) and build
+    the vault blob.
+
+    Oracle's S3 Compatibility API has no OAuth: you generate a Customer Secret
+    Key under your OCI user settings, which yields an Access Key ID + Secret
+    Access Key. Only the key/secret are secret (stored in the vault); namespace,
+    region, and bucket are prompted separately as non-secret config. Reused by
+    add/reauth/recover."""
+    from scatterbox.providers.oracle import credential_blob
+
+    typer.echo(
+        "Oracle Object Storage uses a Customer Secret Key (OCI console -> your "
+        "profile -> Customer Secret Keys). Paste its Access Key and Secret Key."
+    )
+    access_key_id = typer.prompt("Oracle Access Key")
+    secret_access_key = typer.prompt("Oracle Secret Key", hide_input=True)
+    return credential_blob(access_key_id, secret_access_key)
+
+
+def _prompt_oracle_location() -> dict:
+    """Prompt for Oracle's non-secret config (object-storage namespace, region,
+    bucket) — the register config that, with the key/secret, locates the bucket.
+    Reused by add and cold recovery."""
+    namespace = typer.prompt("Oracle object-storage namespace")
+    region = typer.prompt("Oracle region (e.g. us-ashburn-1)")
+    bucket = typer.prompt("Oracle bucket name")
+    return {"namespace": namespace, "region": region, "bucket": bucket}
+
+
+def _onboard_oracle(
+    register: Register,
+    name: str,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> None:
+    """CLI front-end for Oracle Object Storage (S3 access key) onboarding: prompt
+    here, shared store/test/register flow in scatterbox.onboarding."""
+    location = _prompt_oracle_location()
+    blob = _prompt_oracle_blob()
+    v = _unlock()
+    quota = onboarding.onboard_secret_provider(
+        register,
+        v,
+        name,
+        "oracle",
+        blob=blob,
+        extra_config=location,
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
+    )
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} (oracle{free})")
+
+
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | oracle")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
@@ -416,6 +473,16 @@ def provider_add(
             else:
                 _fail(f"provider {name!r} already exists")
             _onboard_koofr(register, name, max_object_bytes, capacity_bytes)
+        elif type_ == "oracle":
+            # S3 access-key backend (not OAuth): its own credential prompt, no
+            # browser consent. Fail on a duplicate name before prompting.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_oracle(register, name, max_object_bytes, capacity_bytes)
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
     except ScatterboxError as exc:
@@ -464,11 +531,12 @@ def provider_reauth(
     register = _open_register()
     try:
         v = _unlock()
-        if register.get_provider_by_name(name)["type"] == "koofr":
-            # App-password backend: re-prompt for the credential, no browser.
-            quota = onboarding.update_provider_secret(
-                register, v, name, _prompt_koofr_blob()
-            )
+        ptype = register.get_provider_by_name(name)["type"]
+        if ptype in ("koofr", "oracle"):
+            # Secret backends (no browser): re-prompt for just the credential —
+            # the Oracle namespace/region/bucket in the register row are kept.
+            blob = _prompt_koofr_blob() if ptype == "koofr" else _prompt_oracle_blob()
+            quota = onboarding.update_provider_secret(register, v, name, blob)
         else:
             quota = onboarding.reauth_provider(
                 register,
@@ -707,7 +775,7 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | oracle.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
@@ -752,6 +820,15 @@ def recover(
             blob = _prompt_koofr_blob()
             provider = create_provider(
                 "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+            )
+        elif type_ == "oracle":
+            # S3 access-key backend: prompt for namespace/region/bucket (to
+            # locate the snapshot) and the key/secret, then recover and adopt.
+            location = _prompt_oracle_location()
+            blob = _prompt_oracle_blob()
+            provider = create_provider(
+                "oracle", {"secret": "recovery", **location},
+                vault.MemorySecretStore(recovery=blob),
             )
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")

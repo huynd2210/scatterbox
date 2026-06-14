@@ -52,7 +52,9 @@ def test_unknown_type_lists_known_types():
 
 def test_builtin_registry_shape():
     # chaos hidden
-    assert known_types() == ["dropbox", "gdrive", "koofr", "localfs", "onedrive", "pcloud"]
+    assert known_types() == [
+        "dropbox", "gdrive", "koofr", "localfs", "onedrive", "oracle", "pcloud"
+    ]
     assert "chaos" in known_types(user_addable_only=False)
     assert requires_secrets("gdrive") and requires_secrets("onedrive")
     assert requires_secrets("dropbox") and requires_secrets("pcloud")
@@ -61,10 +63,11 @@ def test_builtin_registry_shape():
     from scatterbox.onboarding import oauth_types
 
     assert set(oauth_types()) == {"gdrive", "onedrive", "dropbox", "pcloud"}
-    # Koofr keeps credentials in the vault (an app password) but is NOT OAuth:
-    # it requires secrets yet has no oauth_module, so it onboards via its own
-    # app-password prompt rather than the loopback consent flow.
+    # Koofr (app password) and Oracle (an S3 access-key pair) keep credentials in
+    # the vault but are NOT OAuth: they require secrets yet have no oauth_module,
+    # so they onboard via their own credential prompts, not the loopback flow.
     assert requires_secrets("koofr") and "koofr" not in oauth_types()
+    assert requires_secrets("oracle") and "oracle" not in oauth_types()
     assert oauth_types()["gdrive"].AUTH_URL.startswith("https://accounts.google.com")
     # Dropbox verifies redirect URIs exactly -> the loopback port is pinned
     assert oauth_types()["dropbox"].REDIRECT_PORT == 8421

@@ -99,13 +99,20 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr";
+  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr" | "oracle";
   root?: string;
   client_id?: string;
   client_secret?: string;
   // koofr authenticates with an app password (HTTP Basic), not OAuth.
   email?: string;
   app_password?: string;
+  // oracle (Object Storage, S3-compatible) authenticates with an S3 access key
+  // pair; namespace + region + bucket are non-secret config.
+  access_key_id?: string;
+  secret_access_key?: string;
+  namespace?: string;
+  region?: string;
+  bucket?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
 }

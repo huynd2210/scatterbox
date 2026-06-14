@@ -253,6 +253,30 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 provider = create_provider(
                     "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
                 )
+            elif type_ == "oracle":
+                from scatterbox.providers.oracle import credential_blob
+
+                access_key_id = (body.get("access_key_id") or "").strip()
+                secret_access_key = body.get("secret_access_key") or ""
+                namespace = (body.get("namespace") or "").strip()
+                region = (body.get("region") or "").strip()
+                bucket = (body.get("bucket") or "").strip()
+                if not (access_key_id and secret_access_key and namespace and region and bucket):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Oracle namespace, region, bucket, access key and secret key required",
+                    )
+                blob = credential_blob(access_key_id, secret_access_key)
+                provider = create_provider(
+                    "oracle",
+                    {
+                        "secret": "recovery",
+                        "namespace": namespace,
+                        "region": region,
+                        "bucket": bucket,
+                    },
+                    vault.MemorySecretStore(recovery=blob),
+                )
             else:
                 raise HTTPException(
                     status_code=400,
@@ -295,7 +319,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             # and sqlite must not cross threads
             reg = Register(state.home / "register.db")
             try:
-                if reg.get_provider_by_name(name)["type"] == "koofr":
+                ptype = reg.get_provider_by_name(name)["type"]
+                if ptype == "koofr":
                     from scatterbox.providers.koofr import credential_blob
 
                     email = (body.get("email") or "").strip()
@@ -306,6 +331,21 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         )
                     return onboarding.update_provider_secret(
                         reg, state.vault, name, credential_blob(email, app_password)
+                    )
+                if ptype == "oracle":
+                    from scatterbox.providers.oracle import credential_blob
+
+                    access_key_id = (body.get("access_key_id") or "").strip()
+                    secret_access_key = body.get("secret_access_key") or ""
+                    if not access_key_id or not secret_access_key:
+                        raise ScatterboxError(
+                            "Oracle access key and secret key required"
+                        )
+                    return onboarding.update_provider_secret(
+                        reg,
+                        state.vault,
+                        name,
+                        credential_blob(access_key_id, secret_access_key),
                     )
                 return onboarding.reauth_provider(
                     reg,
@@ -762,6 +802,46 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         reg.close()
 
                 await asyncio.to_thread(run_koofr_onboarding)
+            elif type_ == "oracle":
+                _require_unlocked(state)
+                from scatterbox.providers.oracle import credential_blob
+
+                access_key_id = (body.get("access_key_id") or "").strip()
+                secret_access_key = body.get("secret_access_key") or ""
+                namespace = (body.get("namespace") or "").strip()
+                region = (body.get("region") or "").strip()
+                bucket = (body.get("bucket") or "").strip()
+                if not (access_key_id and secret_access_key and namespace and region and bucket):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Oracle namespace, region, bucket, access key and secret key required",
+                    )
+                blob = credential_blob(access_key_id, secret_access_key)
+                extra_config = {
+                    "namespace": namespace,
+                    "region": region,
+                    "bucket": bucket,
+                }
+
+                def run_oracle_onboarding() -> None:
+                    # Own register connection on the worker thread (the shared
+                    # onboarding flow does its connection test via asyncio.run,
+                    # which cannot run inside this event loop).
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_secret_provider(
+                            reg,
+                            state.vault,
+                            name,
+                            "oracle",
+                            blob=blob,
+                            extra_config=extra_config,
+                            **limits,
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_oracle_onboarding)
             else:
                 raise HTTPException(
                     status_code=400,
