@@ -1,7 +1,9 @@
 """Shared HTTP machinery for real provider adapters.
 
-One class, AuthedClient: an httpx wrapper that injects the bearer token from
-a TokenManager and applies the retry discipline every real backend needs —
+One class, AuthedClient: an httpx wrapper that injects the auth credential
+from a TokenManager (as `Authorization: <scheme> <token>` — Bearer by
+default, Basic for app-password backends like Koofr) and applies the retry
+discipline every real backend needs —
 
 - 429 / 5xx → exponential backoff with jitter, honoring Retry-After,
 - 401 → one forced token refresh, then retry (the token may have been
@@ -39,8 +41,9 @@ def _is_rate_limit_403(resp: httpx.Response) -> bool:
 
 
 class AuthedClient:
-    """Bearer-authenticated httpx wrapper with the retry discipline from
-    the module docstring (429/5xx backoff, 401 refresh, transport retry)."""
+    """Authenticated httpx wrapper with the retry discipline from the module
+    docstring (429/5xx backoff, 401 refresh, transport retry). The auth
+    scheme defaults to Bearer; Basic serves app-password backends (Koofr)."""
 
     def __init__(
         self,
@@ -48,10 +51,12 @@ class AuthedClient:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         backoff_base_s: float = 0.5,  # tests set 0 to skip real sleeps
+        auth_scheme: str = "Bearer",  # "Basic" for app-password backends (Koofr)
     ) -> None:
         self._tokens = tokens
         self._transport = transport
         self._backoff_base_s = backoff_base_s
+        self._auth_scheme = auth_scheme
 
     async def request(
         self,
@@ -72,7 +77,7 @@ class AuthedClient:
             token = None
             if authed:
                 token = await self._tokens.access_token()
-                headers["Authorization"] = f"Bearer {token}"
+                headers["Authorization"] = f"{self._auth_scheme} {token}"
             try:
                 async with httpx.AsyncClient(
                     transport=self._transport,

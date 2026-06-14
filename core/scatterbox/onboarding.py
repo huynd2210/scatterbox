@@ -95,18 +95,59 @@ def onboard_oauth_provider(
         client_secret=client_secret,
         open_browser=open_browser,
     )
+    return _store_test_register(
+        register, vault, name, type_, blob,
+        max_object_bytes=max_object_bytes, capacity_bytes=capacity_bytes,
+    )
+
+
+def onboard_secret_provider(
+    register: Register,
+    vault: Vault,
+    name: str,
+    type_: str,
+    *,
+    blob: dict,
+    max_object_bytes: int | None = None,
+    capacity_bytes: int | None = None,
+) -> Quota:
+    """Onboard a secret-requiring backend whose credential is NOT acquired
+    through the OAuth loopback flow (Koofr's app password): the caller builds
+    the credential blob with whatever prompt that backend needs, and this
+    stores it → connection-tests → registers the row, with the same rollback
+    as the OAuth path. Returns the tested quota."""
+    _ensure_name_free(register, name)
+    return _store_test_register(
+        register, vault, name, type_, blob,
+        max_object_bytes=max_object_bytes, capacity_bytes=capacity_bytes,
+    )
+
+
+def _store_test_register(
+    register: Register,
+    vault: Vault,
+    name: str,
+    type_: str,
+    blob: dict,
+    *,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> Quota:
+    """Shared onboarding tail: credential into the vault → live connection
+    test → register row, rolling the secret back if anything fails after it
+    was stored. Used by both the OAuth and app-password onboarding paths."""
     secret_name = f"provider:{name}"
     vault.set_secret(secret_name, blob)
     config = {"secret": secret_name, **_limits(max_object_bytes, capacity_bytes)}
     try:
         instance = create_provider(type_, config, vault)
         quota = asyncio.run(instance.quota())  # connection test
-        if hasattr(instance, "prepare"):  # gdrive/pcloud: create scatterbox/ now
+        if hasattr(instance, "prepare"):  # gdrive/pcloud/koofr: create scatterbox/ now
             asyncio.run(instance.prepare())
             config.update(instance.learned_config())
         register.add_provider(name, type_, config)
     except ScatterboxError:
-        vault.delete_secret(secret_name)  # don't strand tokens for a failed add
+        vault.delete_secret(secret_name)  # don't strand credentials for a failed add
         raise
     return quota
 
@@ -183,6 +224,24 @@ def reauth_provider(
     vault.set_secret(secret_name, blob)
     instance = create_provider(row["type"], config, vault)
     return asyncio.run(instance.quota())  # connection test with the new tokens
+
+
+def update_provider_secret(
+    register: Register, vault: Vault, name: str, blob: dict
+) -> Quota:
+    """Replace the stored credential of an EXISTING secret-backed provider and
+    connection-test it — the reauth path for non-OAuth backends (a Koofr app
+    password that was revoked/regenerated, or one left missing by a cold
+    recovery). Keeps the register row and every replica; returns the tested
+    quota."""
+    row = register.get_provider_by_name(name)
+    config = json.loads(row["config"])
+    secret_name = config.get("secret")
+    if secret_name is None:
+        raise ScatterboxError(f"provider {name!r} ({row['type']}) keeps no credentials")
+    vault.set_secret(secret_name, blob)
+    instance = create_provider(row["type"], config, vault)
+    return asyncio.run(instance.quota())  # connection test with the new credential
 
 
 def pending_reauth(register: Register, vault: Vault) -> list[str]:

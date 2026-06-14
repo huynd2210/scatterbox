@@ -298,6 +298,45 @@ def test_oauth_provider_add_via_api(client, monkeypatch):
     assert any(p["name"] == "gd" for p in client.get("/api/providers").json())
 
 
+def test_koofr_provider_add_via_api(client, monkeypatch):
+    """Koofr is secret-backed but not OAuth: the endpoint takes an email +
+    app password, hands the shared flow a Basic credential blob, no browser."""
+    import base64
+
+    from scatterbox import onboarding
+
+    calls = {}
+
+    def fake_onboard(register, v, name, type_, **kwargs):
+        calls.update({"name": name, "type": type_, **kwargs})
+        register.add_provider(name, type_, {"secret": f"provider:{name}"})
+
+    monkeypatch.setattr(onboarding, "onboard_secret_provider", fake_onboard)
+    # locked: refused before any credential is used
+    resp = client.post(
+        "/api/providers",
+        json={"name": "kf", "type": "koofr", "email": "a@k.test", "app_password": "pw"},
+    )
+    assert resp.status_code == 423 and calls == {}
+
+    unlock(client)
+    # missing app password is rejected up front
+    assert (
+        client.post("/api/providers", json={"name": "kf", "type": "koofr", "email": "a@k.test"}).status_code
+        == 400
+    )
+
+    resp = client.post(
+        "/api/providers",
+        json={"name": "kf", "type": "koofr", "email": "a@k.test", "app_password": "pw"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert calls["name"] == "kf" and calls["type"] == "koofr"
+    # the app password reached the flow as a precomputed Basic credential
+    assert base64.b64decode(calls["blob"]["access_token"]).decode() == "a@k.test:pw"
+    assert any(p["name"] == "kf" for p in client.get("/api/providers").json())
+
+
 def test_export_zip_and_import_on_fresh_home(client, home, tmp_path):
     """Phase 4 via the API: export one zip, import it into a clean home,
     download byte-identical."""

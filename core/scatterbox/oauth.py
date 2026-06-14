@@ -252,11 +252,12 @@ class TokenManager:
         a forced refresh must not be satisfied by the not-yet-expired check."""
         async with self._lock:
             if "refresh_token" not in self._blob:
-                # Non-expiring, non-refreshable token (pCloud) that the server
-                # nonetheless rejected — only re-consent can fix it.
+                # A static, non-refreshable credential (pCloud's non-expiring
+                # token, or a Koofr app password) that the server nonetheless
+                # rejected — only re-authenticating can fix it.
                 raise ScatterboxError(
-                    f"the access token for {self._name} was rejected and it "
-                    "has no refresh token (pCloud issues non-expiring tokens) "
+                    f"the credential for {self._name} was rejected and it has "
+                    "no refresh token (this provider uses a static credential) "
                     "— re-run 'scatterbox provider reauth' to re-authorize"
                 )
             # Another task may have refreshed while we waited on the lock.

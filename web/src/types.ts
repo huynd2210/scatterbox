@@ -99,10 +99,13 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud";
+  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr";
   root?: string;
   client_id?: string;
   client_secret?: string;
+  // koofr authenticates with an app password (HTTP Basic), not OAuth.
+  email?: string;
+  app_password?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
 }

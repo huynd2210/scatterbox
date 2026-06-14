@@ -5,6 +5,7 @@ The OAuth dance and the real adapter are stubbed at the CLI module's seams
 secrets land in the vault, config lands in the register, failures roll back.
 """
 
+import base64
 import json
 import os
 import time
@@ -154,6 +155,47 @@ def test_pcloud_onboarding_is_confidential_and_non_refreshing(env, stub_oauth, m
     config = json.loads(reg.get_provider_by_name("pc")["config"])
     reg.close()
     assert config["folder_id"] == "fold42"
+
+
+def test_koofr_onboarding_stores_a_basic_app_password(env, monkeypatch):
+    """Koofr is secret-backed but not OAuth: the CLI prompts for an email +
+    app password (no browser), stores it as a Basic credential, and registers
+    the row with only non-secret config."""
+
+    class KoofrStub:
+        async def quota(self):
+            return Quota(total_bytes=1000, used_bytes=100, confidence="exact")
+
+        async def prepare(self):
+            pass
+
+        def learned_config(self):
+            return {"mount_id": "m1"}
+
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: KoofrStub())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "kf", "--type", "koofr"],
+            input="alice@koofr.test\napp-pw-123\n",  # email, then app password
+        )
+    )
+    home = env / "home"
+    v = unlock_vault(home / "vault.json", PASS)
+    blob = v.get_secret("provider:kf")
+    # the app password is stored as a precomputed HTTP Basic credential,
+    # not OAuth tokens — nothing to expire or refresh
+    assert base64.b64decode(blob["access_token"]).decode() == "alice@koofr.test:app-pw-123"
+    assert "refresh_token" not in blob and "expires_at" not in blob
+    # ...and the register row carries only non-secret config
+    reg = Register(home / "register.db")
+    row = reg.get_provider_by_name("kf")
+    config = json.loads(row["config"])
+    reg.close()
+    assert row["type"] == "koofr"
+    assert config["secret"] == "provider:kf"
+    assert config["mount_id"] == "m1"  # learned at onboarding
+    assert "app-pw-123" not in row["config"]  # the secret never hits the register
 
 
 def test_failed_connection_test_rolls_back_the_secret(env, stub_oauth, monkeypatch):

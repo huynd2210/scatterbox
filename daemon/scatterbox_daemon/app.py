@@ -239,6 +239,20 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 provider = create_provider(
                     type_, {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
                 )
+            elif type_ == "koofr":
+                from scatterbox.providers.koofr import credential_blob
+
+                email = (body.get("email") or "").strip()
+                app_password = body.get("app_password") or ""
+                if not email or not app_password:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Koofr account email and app password required",
+                    )
+                blob = credential_blob(email, app_password)
+                provider = create_provider(
+                    "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+                )
             else:
                 raise HTTPException(
                     status_code=400,
@@ -277,9 +291,22 @@ def create_app(home: Path | str | None = None) -> FastAPI:
 
         def run_reauth():
             # own register connection: this runs on a worker thread (the
-            # browser consent blocks), and sqlite must not cross threads
+            # browser consent blocks, and the connection test uses asyncio.run),
+            # and sqlite must not cross threads
             reg = Register(state.home / "register.db")
             try:
+                if reg.get_provider_by_name(name)["type"] == "koofr":
+                    from scatterbox.providers.koofr import credential_blob
+
+                    email = (body.get("email") or "").strip()
+                    app_password = body.get("app_password") or ""
+                    if not email or not app_password:
+                        raise ScatterboxError(
+                            "Koofr account email and app password required"
+                        )
+                    return onboarding.update_provider_secret(
+                        reg, state.vault, name, credential_blob(email, app_password)
+                    )
                 return onboarding.reauth_provider(
                     reg,
                     state.vault,
@@ -709,6 +736,32 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         reg.close()
 
                 await asyncio.to_thread(run_onboarding)
+            elif type_ == "koofr":
+                _require_unlocked(state)
+                from scatterbox.providers.koofr import credential_blob
+
+                email = (body.get("email") or "").strip()
+                app_password = body.get("app_password") or ""
+                if not email or not app_password:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Koofr account email and app password required",
+                    )
+                blob = credential_blob(email, app_password)
+
+                def run_koofr_onboarding() -> None:
+                    # Own register connection on the worker thread (the shared
+                    # onboarding flow does its connection test via asyncio.run,
+                    # which cannot run inside this event loop).
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_secret_provider(
+                            reg, state.vault, name, "koofr", blob=blob, **limits
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_koofr_onboarding)
             else:
                 raise HTTPException(
                     status_code=400,

@@ -329,10 +329,51 @@ def _onboard_oauth(
     typer.echo(f"added provider {name} ({type_}{free})")
 
 
+def _prompt_koofr_blob() -> dict:
+    """Prompt for Koofr's app-password credentials and build the vault blob.
+
+    Koofr authenticates with an application-specific password (self-serve in
+    the Koofr web app: Preferences -> Password -> App passwords) sent as HTTP
+    Basic — there is no OAuth consent flow. Reused by add/reauth/recover."""
+    from scatterbox.providers.koofr import credential_blob
+
+    typer.echo(
+        "Koofr uses an application-specific password (generate one under "
+        "Preferences -> Password -> App passwords in the Koofr web app)."
+    )
+    email = typer.prompt("Koofr account email")
+    app_password = typer.prompt("Koofr app password", hide_input=True)
+    return credential_blob(email, app_password)
+
+
+def _onboard_koofr(
+    register: Register,
+    name: str,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> None:
+    """CLI front-end for Koofr (app-password) onboarding: prompt here, shared
+    store/test/register flow in scatterbox.onboarding."""
+    v = _unlock()
+    quota = onboarding.onboard_secret_provider(
+        register,
+        v,
+        name,
+        "koofr",
+        blob=_prompt_koofr_blob(),
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
+    )
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} (koofr{free})")
+
+
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
@@ -365,6 +406,16 @@ def provider_add(
                 register, name, type_, client_id, not no_browser,
                 max_object_bytes, capacity_bytes,
             )
+        elif type_ == "koofr":
+            # Secret-backed but not OAuth: its own app-password prompt, no
+            # browser consent. Fail on a duplicate name before prompting.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_koofr(register, name, max_object_bytes, capacity_bytes)
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
     except ScatterboxError as exc:
@@ -407,19 +458,26 @@ def provider_reauth(
     client_secret: Annotated[Optional[str], typer.Option(help="OAuth client secret (gdrive/pcloud).")] = None,
     no_browser: Annotated[bool, typer.Option("--no-browser")] = False,
 ) -> None:
-    """Re-run the OAuth consent for an existing provider (expired/revoked
-    tokens, or credentials missing after a cold recovery). Keeps the
-    register row and every replica."""
+    """Re-run the consent/credential flow for an existing provider (expired/
+    revoked tokens, a regenerated Koofr app password, or credentials missing
+    after a cold recovery). Keeps the register row and every replica."""
     register = _open_register()
     try:
-        quota = onboarding.reauth_provider(
-            register,
-            _unlock(),
-            name,
-            client_id=client_id,
-            client_secret=client_secret,
-            open_browser=not no_browser,
-        )
+        v = _unlock()
+        if register.get_provider_by_name(name)["type"] == "koofr":
+            # App-password backend: re-prompt for the credential, no browser.
+            quota = onboarding.update_provider_secret(
+                register, v, name, _prompt_koofr_blob()
+            )
+        else:
+            quota = onboarding.reauth_provider(
+                register,
+                v,
+                name,
+                client_id=client_id,
+                client_secret=client_secret,
+                open_browser=not no_browser,
+            )
     except ScatterboxError as exc:
         _fail(str(exc))
     finally:
@@ -649,7 +707,7 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
@@ -687,6 +745,13 @@ def recover(
             )
             provider = create_provider(
                 type_, {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+            )
+        elif type_ == "koofr":
+            # App-password backend: prompt for the credential instead of the
+            # OAuth dance, then recover and adopt it like the OAuth types.
+            blob = _prompt_koofr_blob()
+            provider = create_provider(
+                "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
             )
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")

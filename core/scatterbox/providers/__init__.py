@@ -26,6 +26,7 @@ from scatterbox.providers.base import (
 from scatterbox.providers.chaos import ChaosProvider
 from scatterbox.providers.dropbox import DropboxProvider
 from scatterbox.providers.gdrive import GDriveProvider
+from scatterbox.providers.koofr import KoofrProvider
 from scatterbox.providers.localfs import LocalFSProvider
 from scatterbox.providers.onedrive import OneDriveProvider
 from scatterbox.providers.pcloud import PCloudProvider
@@ -43,6 +44,7 @@ __all__ = [
     "OneDriveProvider",
     "DropboxProvider",
     "PCloudProvider",
+    "KoofrProvider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -142,6 +144,17 @@ def _pcloud_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _koofr_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return KoofrProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        mount_id=config.get("mount_id"),
+        base_url=config.get("base_url"),
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
@@ -180,6 +193,13 @@ ADAPTERS: dict[str, AdapterSpec] = {
         factory=_pcloud_factory,
         requires_secrets=True,
         oauth_module=_oauth_module("pcloud"),
+    ),
+    # Koofr keeps credentials in the vault (an app password) but is NOT an
+    # OAuth backend — no oauth_module, so it onboards via the app-password
+    # prompt path, not the loopback consent flow.
+    "koofr": AdapterSpec(
+        factory=_koofr_factory,
+        requires_secrets=True,
     ),
     # Future backends slot in here (see providers/_template.py):
     #   "discord":  small max_object_bytes (~10 MB), reliability_prior 0.5,

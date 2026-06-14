@@ -37,18 +37,35 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       .catch((e: Error) => setMessage(e.message));
 
   const reauth = (p: ProviderInfo, askCreds = false) => {
-    // First try reusing the stored client app credentials; the daemon asks
-    // for them only when none survive (e.g. right after a cold recovery).
-    const body: { client_id?: string; client_secret?: string } = {};
-    if (askCreds) {
-      const id = prompt(`OAuth client id for ${p.name}`);
-      if (!id) return;
-      body.client_id = id;
-      if (p.type === "gdrive" || p.type === "pcloud") {
-        body.client_secret = prompt("OAuth client secret") ?? undefined;
+    const body: {
+      client_id?: string;
+      client_secret?: string;
+      email?: string;
+      app_password?: string;
+    } = {};
+    if (p.type === "koofr") {
+      // App-password backend: always re-prompt for the new credential (no
+      // browser, nothing to reuse) — e.g. after regenerating it in Koofr.
+      const email = prompt(`Koofr account email for ${p.name}`);
+      if (!email) return;
+      const appPassword = prompt("Koofr app password");
+      if (!appPassword) return;
+      body.email = email;
+      body.app_password = appPassword;
+      setMessage(`updating credentials for ${p.name}…`);
+    } else {
+      // First try reusing the stored client app credentials; the daemon asks
+      // for them only when none survive (e.g. right after a cold recovery).
+      if (askCreds) {
+        const id = prompt(`OAuth client id for ${p.name}`);
+        if (!id) return;
+        body.client_id = id;
+        if (p.type === "gdrive" || p.type === "pcloud") {
+          body.client_secret = prompt("OAuth client secret") ?? undefined;
+        }
       }
+      setMessage(`re-authenticating ${p.name} — check your browser…`);
     }
-    setMessage(`re-authenticating ${p.name} — check your browser…`);
     api
       .reauthProvider(p.name, body)
       .then(() => {
@@ -56,7 +73,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
         refresh();
       })
       .catch((e: Error) => {
-        if (!askCreds && e.message.includes("client id")) {
+        if (p.type !== "koofr" && !askCreds && e.message.includes("client id")) {
           reauth(p, true); // no stored credentials — ask the user
         } else {
           setMessage(e.message);
@@ -103,7 +120,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "gdrive" ||
             p.type === "onedrive" ||
             p.type === "dropbox" ||
-            p.type === "pcloud"
+            p.type === "pcloud" ||
+            p.type === "koofr"
               ? () => reauth(p)
               : undefined
           }
@@ -141,7 +159,7 @@ function ProviderCard({
           {p.reliability !== null && ` · reliability ${(p.reliability * 100).toFixed(0)}%`}
           {p.latency_class && ` · ${p.latency_class}`}
           {onReauth && (
-            <a className="remove" onClick={onReauth} title="re-run the OAuth consent (expired/revoked/recovered)">
+            <a className="remove" onClick={onReauth} title="re-authenticate (expired/revoked/recovered credentials)">
               {" "}
               reauth
             </a>

@@ -78,7 +78,11 @@ fixed OAuth redirect port 8421 — Dropbox verifies redirect URIs exactly),
 `pcloud` (visible `scatterbox/` folder, single multipart uploads + getfilelink
 downloads, fixed redirect port 8422; a confidential client with a non-expiring
 token and no refresh — region (US/EU) auto-detected at consent and pinned in
-the token blob; errors arrive as HTTP-200 `result` codes, not status codes).
+the token blob; errors arrive as HTTP-200 `result` codes, not status codes),
+`koofr` (visible `scatterbox/` folder in the account's primary mount, single
+multipart uploads, path-addressed objects; authenticates with a self-serve
+app password over HTTP Basic — not OAuth — which is static, so a rejected one
+is a re-auth rather than a refresh).
 `chaos` exists for tests only (failure injection: 404s, corruption,
 latency, hard-kill).
 
@@ -278,7 +282,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `get VPATH LOCAL` | Restore byte-identically |
 | `ls [VPATH]`, `status VPATH`, `mv SRC DST`, `rm VPATH` | Browse / health / move / delete |
 | `scrub [--full --repair --probe-limit --deep-budget-bytes]` | Verify + heal |
-| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud …` | Onboard (OAuth flow for cloud types) |
+| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr …` | Onboard (OAuth flow for cloud types; app password for koofr) |
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |

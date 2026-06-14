@@ -119,10 +119,20 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
   const [root, setRoot] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [email, setEmail] = useState("");
+  const [appPassword, setAppPassword] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string[] | null>(null);
+
+  // koofr recovers with an app password instead of an OAuth client id/secret.
+  const missingCreds =
+    type === "localfs"
+      ? !root
+      : type === "koofr"
+        ? !email || !appPassword
+        : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,6 +145,8 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         root: root || undefined,
         client_id: clientId || undefined,
         client_secret: clientSecret || undefined,
+        email: email || undefined,
+        app_password: appPassword || undefined,
       })
       .then((result) => {
         if (result.pending_reauth.length > 0) {
@@ -175,6 +187,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="onedrive">OneDrive</option>
           <option value="dropbox">Dropbox</option>
           <option value="pcloud">pCloud</option>
+          <option value="koofr">Koofr</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -182,6 +195,26 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             value={root}
             onChange={(e) => setRoot(e.target.value)}
           />
+        ) : type === "koofr" ? (
+          <>
+            <input
+              placeholder="Koofr account email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+            <input
+              type="password"
+              placeholder="Koofr app password"
+              value={appPassword}
+              onChange={(e) => setAppPassword(e.target.value)}
+            />
+            <p className="muted small">
+              Koofr uses an app password (HTTP Basic), not OAuth — no browser
+              consent. Generate a fresh one in the Koofr web app if the old is
+              gone with the machine.
+            </p>
+            <KoofrGuide />
+          </>
         ) : (
           <>
             <input
@@ -211,9 +244,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           value={passphrase}
           onChange={(e) => setPassphrase(e.target.value)}
         />
-        <button
-          disabled={busy || passphrase === "" || (type === "localfs" ? !root : !clientId)}
-        >
+        <button disabled={busy || passphrase === "" || missingCreds}>
           {busy ? "recovering…" : "recover"}
         </button>
         <button type="button" className="ghost" onClick={onBack}>
@@ -517,6 +548,43 @@ function OAuthGuide({
   );
 }
 
+/** Koofr's app-password walkthrough — Koofr isn't OAuth, so it gets its own
+ * guide: there is no app to register, just a self-serve app password. */
+function KoofrGuide() {
+  return (
+    <details className="setup-guide">
+      <summary>where do I get the app password? — step-by-step</summary>
+      <ol>
+        <li>
+          Sign in at{" "}
+          <a href="https://app.koofr.net" target="_blank" rel="noreferrer">
+            app.koofr.net
+          </a>{" "}
+          with the Koofr account whose storage you want to use.
+        </li>
+        <li>
+          Open <em>Preferences → Password</em> (the profile menu, top-right),
+          and scroll to <strong>App passwords</strong>.
+        </li>
+        <li>
+          Give it a name (e.g. <code>scatterbox</code>) and click{" "}
+          <strong>Generate</strong>. Copy the password it shows.
+        </li>
+        <li>
+          Paste your account email and that app password into this form. No
+          OAuth app, no client id/secret, no browser consent.
+        </li>
+      </ol>
+      <p className="muted">
+        scatterbox stores everything in a visible <code>scatterbox/</code>{" "}
+        folder in your Koofr account (chunks are encrypted before upload). App
+        passwords are limited-scope and individually revocable: revoke one in
+        the same screen and run <em>reauth</em> to swap in a fresh one.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -524,8 +592,18 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [root, setRoot] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [email, setEmail] = useState("");
+  const [appPassword, setAppPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // koofr is secret-backed but not OAuth: app password, no browser consent.
+  const missingCreds =
+    type === "localfs"
+      ? !root
+      : type === "koofr"
+        ? !email || !appPassword
+        : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -538,10 +616,13 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         root: root || undefined,
         client_id: clientId || undefined,
         client_secret: clientSecret || undefined,
+        email: email || undefined,
+        app_password: appPassword || undefined,
       })
       .then(() => {
         setName("");
         setRoot("");
+        setAppPassword("");
         onAdded();
       })
       .catch((err: Error) => setError(err.message))
@@ -560,6 +641,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="onedrive">OneDrive</option>
           <option value="dropbox">Dropbox</option>
           <option value="pcloud">pCloud</option>
+          <option value="koofr">Koofr</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -579,6 +661,26 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
             drive, a NAS/network mount. It is created if missing, and only
             encrypted chunks land in it.
           </p>
+        </>
+      ) : type === "koofr" ? (
+        <>
+          <input
+            placeholder="Koofr account email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Koofr app password"
+            value={appPassword}
+            onChange={(e) => setAppPassword(e.target.value)}
+          />
+          <p className="muted small">
+            Koofr uses an app password (HTTP Basic), not OAuth — no app to
+            register and no browser consent. Generate one in the Koofr web app
+            and paste it here.
+          </p>
+          <KoofrGuide />
         </>
       ) : (
         <>
@@ -620,9 +722,9 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         </>
       )}
       <div className="form-row">
-        <button disabled={busy || !name || (type === "localfs" ? !root : !clientId)}>
+        <button disabled={busy || !name || missingCreds}>
           {busy
-            ? type === "localfs"
+            ? type === "localfs" || type === "koofr"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}

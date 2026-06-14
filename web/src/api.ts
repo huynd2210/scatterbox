@@ -52,14 +52,18 @@ export const api = {
     root?: string;
     client_id?: string;
     client_secret?: string;
+    email?: string;
+    app_password?: string;
     name?: string;
   }) =>
     request<{ files: number; adopted: string | null; pending_reauth: string[] }>(
       "/api/recover",
       json(body),
     ),
-  reauthProvider: (name: string, body: { client_id?: string; client_secret?: string }) =>
-    request(`/api/providers/${encodeURIComponent(name)}/reauth`, json(body)),
+  reauthProvider: (
+    name: string,
+    body: { client_id?: string; client_secret?: string; email?: string; app_password?: string },
+  ) => request(`/api/providers/${encodeURIComponent(name)}/reauth`, json(body)),
   unlock: (passphrase: string) => request("/api/unlock", json({ passphrase })),
   lock: () => request("/api/lock", { method: "POST" }),
 
