@@ -139,7 +139,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
   const missingCreds =
     type === "localfs"
       ? !root
-      : type === "koofr"
+      : type === "koofr" || type === "mega"
         ? !email || !appPassword
         : type === "r2"
           ? !accessKeyId || !secretAccessKey || !accountId || !bucket
@@ -163,7 +163,8 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         client_id: clientId || undefined,
         client_secret: clientSecret || undefined,
         email: email || undefined,
-        app_password: appPassword || undefined,
+        app_password: type === "koofr" ? appPassword || undefined : undefined,
+        password: type === "mega" ? appPassword || undefined : undefined,
         access_key_id: accessKeyId || undefined,
         secret_access_key: secretAccessKey || undefined,
         account_id: accountId || undefined,
@@ -216,6 +217,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="oracle">Oracle Object Storage</option>
           <option value="tigris">Tigris</option>
           <option value="vercel_blob">Vercel Blob</option>
+          <option value="mega">MEGA</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -328,25 +330,33 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             </p>
             <R2Guide />
           </>
-        ) : type === "koofr" ? (
+        ) : type === "koofr" || type === "mega" ? (
           <>
             <input
-              placeholder="Koofr account email"
+              placeholder={type === "koofr" ? "Koofr account email" : "MEGA account email"}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
             <input
               type="password"
-              placeholder="Koofr app password"
+              placeholder={type === "koofr" ? "Koofr app password" : "MEGA password"}
               value={appPassword}
               onChange={(e) => setAppPassword(e.target.value)}
             />
-            <p className="muted small">
-              Koofr uses an app password (HTTP Basic), not OAuth — no browser
-              consent. Generate a fresh one in the Koofr web app if the old is
-              gone with the machine.
-            </p>
-            <KoofrGuide />
+            {type === "koofr" ? (
+              <p className="muted small">
+                Koofr uses an app password (HTTP Basic), not OAuth — no browser
+                consent. Generate a fresh one in the Koofr web app if the old is
+                gone with the machine.
+              </p>
+            ) : (
+              <p className="muted small">
+                MEGA uses your account email + password (no OAuth, no app
+                password). It is stored in the encrypted vault and grants full
+                account access.
+              </p>
+            )}
+            {type === "koofr" ? <KoofrGuide /> : <MegaGuide />}
           </>
         ) : (
           <>
@@ -864,6 +874,39 @@ function VercelBlobGuide() {
   );
 }
 
+/** MEGA's guide — there is no app to register, just the account email +
+ * password, with the security caveat that (unlike OAuth/app-password backends)
+ * the full account password is what gets stored. */
+function MegaGuide() {
+  return (
+    <details className="setup-guide">
+      <summary>what does MEGA need? — and the caveat</summary>
+      <ol>
+        <li>
+          Just the email and password of your{" "}
+          <a href="https://mega.nz" target="_blank" rel="noreferrer">
+            mega.nz
+          </a>{" "}
+          account — there is no app to register, no client id/secret, and no
+          browser consent.
+        </li>
+        <li>
+          Two-factor auth is not supported; use an account without 2FA (a
+          dedicated MEGA account for scatterbox is a good idea).
+        </li>
+      </ol>
+      <p className="muted">
+        <strong>Caveat:</strong> unlike the OAuth backends (scoped) and Koofr (a
+        revocable app password), MEGA has no scoped credential — the full
+        account password is stored in the encrypted vault and grants total
+        account access. scatterbox confines itself to a visible{" "}
+        <code>scatterbox/</code> folder and encrypts every chunk before upload,
+        but a dedicated account is the safer choice.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -889,7 +932,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const missingCreds =
     type === "localfs"
       ? !root
-      : type === "koofr"
+      : type === "koofr" || type === "mega"
         ? !email || !appPassword
         : type === "r2"
           ? !accessKeyId || !secretAccessKey || !accountId || !bucket
@@ -913,7 +956,8 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         client_id: clientId || undefined,
         client_secret: clientSecret || undefined,
         email: email || undefined,
-        app_password: appPassword || undefined,
+        app_password: type === "koofr" ? appPassword || undefined : undefined,
+        password: type === "mega" ? appPassword || undefined : undefined,
         access_key_id: accessKeyId || undefined,
         secret_access_key: secretAccessKey || undefined,
         account_id: accountId || undefined,
@@ -951,6 +995,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="oracle">Oracle Object Storage</option>
           <option value="tigris">Tigris</option>
           <option value="vercel_blob">Vercel Blob</option>
+          <option value="mega">MEGA</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -1076,25 +1121,34 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           </p>
           <VercelBlobGuide />
         </>
-      ) : type === "koofr" ? (
+      ) : type === "koofr" || type === "mega" ? (
         <>
           <input
-            placeholder="Koofr account email"
+            placeholder={type === "koofr" ? "Koofr account email" : "MEGA account email"}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
           <input
             type="password"
-            placeholder="Koofr app password"
+            placeholder={type === "koofr" ? "Koofr app password" : "MEGA password"}
             value={appPassword}
             onChange={(e) => setAppPassword(e.target.value)}
           />
-          <p className="muted small">
-            Koofr uses an app password (HTTP Basic), not OAuth — no app to
-            register and no browser consent. Generate one in the Koofr web app
-            and paste it here.
-          </p>
-          <KoofrGuide />
+          {type === "koofr" ? (
+            <p className="muted small">
+              Koofr uses an app password (HTTP Basic), not OAuth — no app to
+              register and no browser consent. Generate one in the Koofr web app
+              and paste it here.
+            </p>
+          ) : (
+            <p className="muted small">
+              MEGA uses your account email + password (no OAuth, no app
+              password). It is stored in the encrypted vault and grants full
+              account access — scatterbox confines itself to a scatterbox/
+              folder.
+            </p>
+          )}
+          {type === "koofr" ? <KoofrGuide /> : <MegaGuide />}
         </>
       ) : (
         <>
@@ -1143,7 +1197,8 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
               type === "r2" ||
               type === "oracle" ||
               type === "tigris" ||
-              type === "vercel_blob"
+              type === "vercel_blob" ||
+              type === "mega"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}

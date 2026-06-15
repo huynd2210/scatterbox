@@ -28,6 +28,7 @@ from scatterbox.providers.dropbox import DropboxProvider
 from scatterbox.providers.gdrive import GDriveProvider
 from scatterbox.providers.koofr import KoofrProvider
 from scatterbox.providers.localfs import LocalFSProvider
+from scatterbox.providers.mega import MegaProvider
 from scatterbox.providers.onedrive import OneDriveProvider
 from scatterbox.providers.oracle import OracleProvider
 from scatterbox.providers.pcloud import PCloudProvider
@@ -53,6 +54,7 @@ __all__ = [
     "OracleProvider",
     "TigrisProvider",
     "VercelBlobProvider",
+    "MegaProvider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -208,6 +210,16 @@ def _vercel_blob_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _mega_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return MegaProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        folder_handle=config.get("folder_handle"),
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
@@ -283,11 +295,18 @@ ADAPTERS: dict[str, AdapterSpec] = {
         factory=_vercel_blob_factory,
         requires_secrets=True,
     ),
+    # MEGA keeps the account email+password in the vault and runs its own
+    # login/crypto inside the adapter — a secret backend with no oauth_module,
+    # so it onboards via the email+password prompt path, not the loopback flow.
+    "mega": AdapterSpec(
+        factory=_mega_factory,
+        requires_secrets=True,
+    ),
     # Future backends slot in here (see providers/_template.py):
     #   "discord":  small max_object_bytes (~10 MB), reliability_prior 0.5,
     #               exposure_risk high, token-configured
     #   "youtube":  Transform-stage adapter (bytes -> video), glacial
-    #   "mega" / "pastebin" / ...: register_adapter("mega", AdapterSpec(...))
+    #   "pastebin" / ...: register_adapter("pastebin", AdapterSpec(...))
 }
 
 

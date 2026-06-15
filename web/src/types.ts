@@ -109,7 +109,8 @@ export interface NewProvider {
     | "r2"
     | "oracle"
     | "tigris"
-    | "vercel_blob";
+    | "vercel_blob"
+    | "mega";
   root?: string;
   client_id?: string;
   client_secret?: string;
@@ -127,6 +128,8 @@ export interface NewProvider {
   bucket?: string;
   // vercel_blob authenticates with a single static read-write token (Bearer).
   token?: string;
+  // mega authenticates with the account email + password (non-OAuth secret).
+  password?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
 }

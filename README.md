@@ -128,8 +128,8 @@ Most provider types need a one-time (free) OAuth app registration — Google
 and Microsoft don't let software talk to their APIs anonymously. Several are
 the exceptions: Koofr uses a self-serve **app password**, Cloudflare R2 /
 Oracle Object Storage / Tigris an **S3 access key/secret**, and Vercel Blob a
-single **read-write token** — none needing an OAuth app. Short version
-(details: TASKS.md §7):
+single **read-write token**, and MEGA the account **email + password** — none
+needing an OAuth app. Short version (details: TASKS.md §7):
 
 - **Google Drive:** create a project at console.cloud.google.com, enable the
   Drive API, configure the consent screen (add yourself as test user,
@@ -174,6 +174,12 @@ single **read-write token** — none needing an OAuth app. Short version
   for that token (a static bearer credential). Roll the token in the dashboard
   and run `provider reauth` to update it. Note Blob objects are served from
   public, unguessable URLs — scatterbox's encryption is what keeps them private.
+- **MEGA:** no OAuth and no app password — `provider add` prompts for your
+  account email + password, and the adapter runs MEGA's own login/crypto
+  handshake (it derives the account key from the password client-side). 2FA
+  accounts are not supported. **Caveat:** the full password is stored in the
+  encrypted vault and grants total account access — there is no scoped
+  credential, so prefer a dedicated MEGA account.
 
 Then either add them in the web UI (providers tab → add provider — a
 consent tab opens in your browser) or via the CLI:
@@ -188,16 +194,18 @@ uv run scatterbox provider add r2 --type r2         # prompts account/bucket + S
 uv run scatterbox provider add or --type oracle     # prompts namespace/region/bucket + S3 key/secret
 uv run scatterbox provider add tg --type tigris     # prompts bucket + S3 key/secret, no browser
 uv run scatterbox provider add vb --type vercel_blob # prompts read-write token, no browser
+uv run scatterbox provider add mg --type mega       # prompts email + password, no browser
 uv run scatterbox provider list                     # real quota, confidence-labelled
 ```
 
 Tokens land in the encrypted vault, never in the register. Scopes are
 minimal where the provider allows it: scatterbox can only touch files it
 created (`drive.file` / the OneDrive and Dropbox app folders) — never the
-rest of your account. pCloud and Koofr are the exceptions — they grant
+rest of your account. pCloud, Koofr, and MEGA are the exceptions — they grant
 whole-account access — so scatterbox confines itself to a single visible
 `scatterbox/` folder there (and every chunk is encrypted before upload
-regardless). The S3 backends are bucket-scoped: Cloudflare R2's and Tigris's
+regardless). MEGA goes furthest: its only credential is the full account
+password, so a dedicated account is wise. The S3 backends are bucket-scoped: Cloudflare R2's and Tigris's
 access keys only reach the bucket you grant them, and while Oracle's Customer
 Secret Key reaches your whole tenancy scatterbox only touches the one bucket you
 configure — all keep their objects under a `scatterbox/` key prefix (every chunk
