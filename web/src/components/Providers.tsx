@@ -44,6 +44,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       app_password?: string;
       access_key_id?: string;
       secret_access_key?: string;
+      token?: string;
     } = {};
     if (p.type === "koofr") {
       // App-password backend: always re-prompt for the new credential (no
@@ -77,6 +78,12 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       body.access_key_id = accessKeyId;
       body.secret_access_key = secretAccessKey;
       setMessage(`updating credentials for ${p.name}…`);
+    } else if (p.type === "vercel_blob") {
+      // Token backend: re-prompt for the new read-write token (no browser).
+      const t = prompt(`Vercel Blob read-write token for ${p.name}`);
+      if (!t) return;
+      body.token = t;
+      setMessage(`updating credentials for ${p.name}…`);
     } else {
       // First try reusing the stored client app credentials; the daemon asks
       // for them only when none survive (e.g. right after a cold recovery).
@@ -102,6 +109,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
           p.type !== "r2" &&
           p.type !== "oracle" &&
           p.type !== "tigris" &&
+          p.type !== "vercel_blob" &&
           !askCreds &&
           e.message.includes("client id")
         ) {
@@ -155,7 +163,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "koofr" ||
             p.type === "r2" ||
             p.type === "oracle" ||
-            p.type === "tigris"
+            p.type === "tigris" ||
+            p.type === "vercel_blob"
               ? () => reauth(p)
               : undefined
           }

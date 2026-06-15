@@ -108,7 +108,8 @@ export interface NewProvider {
     | "koofr"
     | "r2"
     | "oracle"
-    | "tigris";
+    | "tigris"
+    | "vercel_blob";
   root?: string;
   client_id?: string;
   client_secret?: string;
@@ -124,6 +125,8 @@ export interface NewProvider {
   namespace?: string;
   region?: string;
   bucket?: string;
+  // vercel_blob authenticates with a single static read-write token (Bearer).
+  token?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
 }

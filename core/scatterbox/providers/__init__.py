@@ -33,6 +33,7 @@ from scatterbox.providers.oracle import OracleProvider
 from scatterbox.providers.pcloud import PCloudProvider
 from scatterbox.providers.r2 import R2Provider
 from scatterbox.providers.tigris import TigrisProvider
+from scatterbox.providers.vercel_blob import VercelBlobProvider
 from scatterbox.vault import SecretStore
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "R2Provider",
     "OracleProvider",
     "TigrisProvider",
+    "VercelBlobProvider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -197,6 +199,15 @@ def _tigris_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _vercel_blob_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return VercelBlobProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
@@ -263,6 +274,13 @@ ADAPTERS: dict[str, AdapterSpec] = {
     # endpoint is fixed, so only the non-secret bucket is register config.
     "tigris": AdapterSpec(
         factory=_tigris_factory,
+        requires_secrets=True,
+    ),
+    # Vercel Blob keeps a single read-write token in the vault and is NOT OAuth —
+    # no oauth_module, so it onboards via the token prompt path. Its base host is
+    # fixed, so it needs no non-secret register config beyond the secret ref.
+    "vercel_blob": AdapterSpec(
+        factory=_vercel_blob_factory,
         requires_secrets=True,
     ),
     # Future backends slot in here (see providers/_template.py):

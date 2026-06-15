@@ -102,6 +102,13 @@ key-addressed objects; authenticates with an S3 access key/secret signed with
 AWS SigV4 — not OAuth — static, so a rejected key is a re-auth. Only the
 non-secret bucket is register config (the endpoint is fixed); same shared S3
 core, same quota behaviour).
+`vercel_blob` (Vercel Blob REST API — NOT S3: objects under a `scatterbox/`
+pathname prefix, single-request PUT uploads, the returned public URL is the
+ref; authenticates with a single static read-write token as a Bearer credential
+via the shared TokenManager/AuthedClient — not OAuth — so a rejected token is a
+re-auth. Objects are served from public unguessable URLs, so get() fetches them
+without the bearer and exposure_risk is 'high'; no register config beyond the
+secret ref; quota lists the prefix, 'estimated' with a cap else 'unknown').
 `chaos` exists for tests only (failure injection: 404s, corruption,
 latency, hard-kill).
 
@@ -301,7 +308,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `get VPATH LOCAL` | Restore byte-identically |
 | `ls [VPATH]`, `status VPATH`, `mv SRC DST`, `rm VPATH` | Browse / health / move / delete |
 | `scrub [--full --repair --probe-limit --deep-budget-bytes]` | Verify + heal |
-| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2\|oracle\|tigris …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2/oracle/tigris) |
+| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2\|oracle\|tigris\|vercel_blob …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2/oracle/tigris; token for vercel_blob) |
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |

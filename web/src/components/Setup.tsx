@@ -127,13 +127,15 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
   const [namespace, setNamespace] = useState("");
   const [region, setRegion] = useState("");
   const [bucket, setBucket] = useState("");
+  const [token, setToken] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string[] | null>(null);
 
   // koofr recovers with an app password; the S3 backends with an access key
-  // pair + their location, instead of an OAuth client id/secret.
+  // pair + their location; vercel_blob with a read-write token — instead of an
+  // OAuth client id/secret.
   const missingCreds =
     type === "localfs"
       ? !root
@@ -145,7 +147,9 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             ? !accessKeyId || !secretAccessKey || !namespace || !region || !bucket
             : type === "tigris"
               ? !accessKeyId || !secretAccessKey || !bucket
-              : !clientId;
+              : type === "vercel_blob"
+                ? !token
+                : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -166,6 +170,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         namespace: namespace || undefined,
         region: region || undefined,
         bucket: bucket || undefined,
+        token: token || undefined,
       })
       .then((result) => {
         if (result.pending_reauth.length > 0) {
@@ -210,6 +215,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="r2">Cloudflare R2</option>
           <option value="oracle">Oracle Object Storage</option>
           <option value="tigris">Tigris</option>
+          <option value="vercel_blob">Vercel Blob</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -276,6 +282,21 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
               dashboard if the old one is gone with the machine.
             </p>
             <TigrisGuide />
+          </>
+        ) : type === "vercel_blob" ? (
+          <>
+            <input
+              type="password"
+              placeholder="Vercel Blob read-write token"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+            <p className="muted small">
+              Vercel Blob uses a read-write token (Bearer), not OAuth — no
+              browser consent. Copy a fresh one from the Vercel dashboard if the
+              old one is gone with the machine.
+            </p>
+            <VercelBlobGuide />
           </>
         ) : type === "r2" ? (
           <>
@@ -809,6 +830,40 @@ function TigrisGuide() {
   );
 }
 
+/** Vercel Blob's walkthrough — it isn't OAuth: you copy a single read-write
+ * token (Bearer) from a Blob store in the Vercel dashboard. */
+function VercelBlobGuide() {
+  return (
+    <details className="setup-guide">
+      <summary>where do I get the Vercel Blob token? — step-by-step</summary>
+      <ol>
+        <li>
+          In the{" "}
+          <a href="https://vercel.com/dashboard/stores" target="_blank" rel="noreferrer">
+            Vercel dashboard
+          </a>{" "}
+          open <em>Storage</em> and create a <strong>Blob</strong> store (or pick
+          an existing one).
+        </li>
+        <li>
+          On the store's <em>Tokens</em> tab (or its <code>.env.local</code>{" "}
+          snippet) copy the <strong>BLOB_READ_WRITE_TOKEN</strong> value.
+        </li>
+        <li>
+          Paste it here. No OAuth app, no client id/secret, no browser consent.
+        </li>
+      </ol>
+      <p className="muted">
+        scatterbox stores everything under a <code>scatterbox/</code> pathname
+        prefix in the store (chunks are encrypted before upload). Note that Blob
+        objects are served from public, unguessable URLs — encryption is what
+        keeps them private. The token is revocable: roll it in the dashboard and
+        run <em>reauth</em> to swap in the fresh one.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -824,11 +879,13 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [namespace, setNamespace] = useState("");
   const [region, setRegion] = useState("");
   const [bucket, setBucket] = useState("");
+  const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // koofr (app password) and the S3 backends (an access key pair + their
-  // location) are secret-backed but not OAuth: no browser consent.
+  // koofr (app password), the S3 backends (an access key pair + their location),
+  // and vercel_blob (a read-write token) are secret-backed but not OAuth: no
+  // browser consent.
   const missingCreds =
     type === "localfs"
       ? !root
@@ -840,7 +897,9 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
             ? !accessKeyId || !secretAccessKey || !namespace || !region || !bucket
             : type === "tigris"
               ? !accessKeyId || !secretAccessKey || !bucket
-              : !clientId;
+              : type === "vercel_blob"
+                ? !token
+                : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -861,12 +920,14 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         namespace: namespace || undefined,
         region: region || undefined,
         bucket: bucket || undefined,
+        token: token || undefined,
       })
       .then(() => {
         setName("");
         setRoot("");
         setAppPassword("");
         setSecretAccessKey("");
+        setToken("");
         onAdded();
       })
       .catch((err: Error) => setError(err.message))
@@ -889,6 +950,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="r2">Cloudflare R2</option>
           <option value="oracle">Oracle Object Storage</option>
           <option value="tigris">Tigris</option>
+          <option value="vercel_blob">Vercel Blob</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -999,6 +1061,21 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           </p>
           <TigrisGuide />
         </>
+      ) : type === "vercel_blob" ? (
+        <>
+          <input
+            type="password"
+            placeholder="Vercel Blob read-write token"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <p className="muted small">
+            Vercel Blob uses a read-write token (Bearer), not OAuth — no app to
+            register and no browser consent. Copy it from the Vercel dashboard
+            and paste it here.
+          </p>
+          <VercelBlobGuide />
+        </>
       ) : type === "koofr" ? (
         <>
           <input
@@ -1065,7 +1142,8 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
               type === "koofr" ||
               type === "r2" ||
               type === "oracle" ||
-              type === "tigris"
+              type === "tigris" ||
+              type === "vercel_blob"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}

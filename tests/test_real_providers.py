@@ -14,6 +14,7 @@ To run, onboard a provider into a dedicated scatterbox home first:
     set SCATTERBOX_TEST_R2=r2
     set SCATTERBOX_TEST_ORACLE=or
     set SCATTERBOX_TEST_TIGRIS=tg
+    set SCATTERBOX_TEST_VERCEL_BLOB=vb
     uv run pytest tests/test_real_providers.py -v
 
 Each test stores a small file pinned to that single provider (replicas=1),
@@ -134,3 +135,11 @@ def test_oracle_real_roundtrip(tmp_path):
 )
 def test_tigris_real_roundtrip(tmp_path):
     _roundtrip(os.environ["SCATTERBOX_TEST_TIGRIS"], tmp_path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCATTERBOX_TEST_VERCEL_BLOB"),
+    reason="set SCATTERBOX_TEST_VERCEL_BLOB=<provider name> to run against Vercel Blob",
+)
+def test_vercel_blob_real_roundtrip(tmp_path):
+    _roundtrip(os.environ["SCATTERBOX_TEST_VERCEL_BLOB"], tmp_path)

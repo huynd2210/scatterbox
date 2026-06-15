@@ -53,7 +53,8 @@ def test_unknown_type_lists_known_types():
 def test_builtin_registry_shape():
     # chaos hidden
     assert known_types() == [
-        "dropbox", "gdrive", "koofr", "localfs", "onedrive", "oracle", "pcloud", "r2", "tigris"
+        "dropbox", "gdrive", "koofr", "localfs", "onedrive", "oracle",
+        "pcloud", "r2", "tigris", "vercel_blob",
     ]
     assert "chaos" in known_types(user_addable_only=False)
     assert requires_secrets("gdrive") and requires_secrets("onedrive")
@@ -70,6 +71,8 @@ def test_builtin_registry_shape():
     assert requires_secrets("r2") and "r2" not in oauth_types()
     assert requires_secrets("oracle") and "oracle" not in oauth_types()
     assert requires_secrets("tigris") and "tigris" not in oauth_types()
+    # Vercel Blob keeps a single read-write token in the vault, also not OAuth.
+    assert requires_secrets("vercel_blob") and "vercel_blob" not in oauth_types()
     assert oauth_types()["gdrive"].AUTH_URL.startswith("https://accounts.google.com")
     # Dropbox verifies redirect URIs exactly -> the loopback port is pinned
     assert oauth_types()["dropbox"].REDIRECT_PORT == 8421

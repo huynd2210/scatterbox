@@ -125,10 +125,11 @@ in background jobs, never in a request you're waiting on. The daemon binds
 ## Real providers
 
 Most provider types need a one-time (free) OAuth app registration — Google
-and Microsoft don't let software talk to their APIs anonymously. Koofr and the
-S3-compatible backends are the exceptions: Koofr uses a self-serve **app
-password**, and Cloudflare R2 / Oracle Object Storage / Tigris an **S3 access
-key/secret**, neither needing an OAuth app. Short version (details: TASKS.md §7):
+and Microsoft don't let software talk to their APIs anonymously. Several are
+the exceptions: Koofr uses a self-serve **app password**, Cloudflare R2 /
+Oracle Object Storage / Tigris an **S3 access key/secret**, and Vercel Blob a
+single **read-write token** — none needing an OAuth app. Short version
+(details: TASKS.md §7):
 
 - **Google Drive:** create a project at console.cloud.google.com, enable the
   Drive API, configure the consent screen (add yourself as test user,
@@ -168,6 +169,11 @@ key/secret**, neither needing an OAuth app. Short version (details: TASKS.md §7
   the key's **Access Key ID + Secret Access Key**. Tigris speaks the S3 API at a
   single global endpoint (requests are AWS SigV4 signed); the key/secret are
   revocable — rotate one and run `provider reauth` to update it.
+- **Vercel Blob:** no OAuth. In the Vercel dashboard create a *Blob* store
+  under Storage and copy its **BLOB_READ_WRITE_TOKEN**; `provider add` prompts
+  for that token (a static bearer credential). Roll the token in the dashboard
+  and run `provider reauth` to update it. Note Blob objects are served from
+  public, unguessable URLs — scatterbox's encryption is what keeps them private.
 
 Then either add them in the web UI (providers tab → add provider — a
 consent tab opens in your browser) or via the CLI:
@@ -181,6 +187,7 @@ uv run scatterbox provider add kf --type koofr      # prompts email + app passwo
 uv run scatterbox provider add r2 --type r2         # prompts account/bucket + S3 key/secret, no browser
 uv run scatterbox provider add or --type oracle     # prompts namespace/region/bucket + S3 key/secret
 uv run scatterbox provider add tg --type tigris     # prompts bucket + S3 key/secret, no browser
+uv run scatterbox provider add vb --type vercel_blob # prompts read-write token, no browser
 uv run scatterbox provider list                     # real quota, confidence-labelled
 ```
 
@@ -194,7 +201,10 @@ regardless). The S3 backends are bucket-scoped: Cloudflare R2's and Tigris's
 access keys only reach the bucket you grant them, and while Oracle's Customer
 Secret Key reaches your whole tenancy scatterbox only touches the one bucket you
 configure — all keep their objects under a `scatterbox/` key prefix (every chunk
-encrypted before upload regardless).
+encrypted before upload regardless). Vercel Blob's token is scoped to its one
+store (objects under a `scatterbox/` pathname prefix), but its objects are
+served from public, if unguessable, URLs — the per-chunk encryption is what
+keeps them private there.
 
 Per-instance limits are user-configurable and always respected:
 

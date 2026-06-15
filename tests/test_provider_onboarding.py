@@ -300,6 +300,38 @@ def test_tigris_onboarding_stores_keys_in_vault_and_bucket_in_register(env, monk
     assert "SECRETXYZ" not in row["config"]
 
 
+def test_vercel_blob_onboarding_stores_a_bearer_token(env, monkeypatch):
+    """Vercel Blob is secret-backed but not OAuth: the CLI prompts for a single
+    read-write token (no browser), stores it as a static bearer credential, and
+    registers a row with only non-secret config."""
+
+    class VercelStub:
+        async def quota(self):
+            return Quota(total_bytes=None, used_bytes=0, confidence="unknown")
+
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: VercelStub())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "vb", "--type", "vercel_blob"],
+            input="vercel_rw_tok_123\n",  # the read-write token
+        )
+    )
+    home = env / "home"
+    v = unlock_vault(home / "vault.json", PASS)
+    blob = v.get_secret("provider:vb")
+    # the token is stored as a static bearer credential, not OAuth tokens
+    assert blob == {"access_token": "vercel_rw_tok_123"}
+    assert "refresh_token" not in blob and "expires_at" not in blob
+    reg = Register(home / "register.db")
+    row = reg.get_provider_by_name("vb")
+    config = json.loads(row["config"])
+    reg.close()
+    assert row["type"] == "vercel_blob"
+    assert config["secret"] == "provider:vb"
+    assert "vercel_rw_tok_123" not in row["config"]  # the token never hits the register
+
+
 def test_failed_connection_test_rolls_back_the_secret(env, stub_oauth, monkeypatch):
     monkeypatch.setattr(
         onboarding,

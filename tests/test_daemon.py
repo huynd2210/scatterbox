@@ -466,6 +466,37 @@ def test_tigris_provider_add_via_api(client, monkeypatch):
     assert any(p["name"] == "tg" for p in client.get("/api/providers").json())
 
 
+def test_vercel_blob_provider_add_via_api(client, monkeypatch):
+    """Vercel Blob is secret-backed but not OAuth: the endpoint takes a single
+    read-write token and hands the shared flow the bearer blob, no browser."""
+    from scatterbox import onboarding
+
+    calls = {}
+
+    def fake_onboard(register, v, name, type_, **kwargs):
+        calls.update({"name": name, "type": type_, **kwargs})
+        register.add_provider(name, type_, {"secret": f"provider:{name}"})
+
+    monkeypatch.setattr(onboarding, "onboard_secret_provider", fake_onboard)
+    full = {"name": "vb", "type": "vercel_blob", "token": "vercel_rw_tok"}
+    # locked: refused before any credential is used
+    assert client.post("/api/providers", json=full).status_code == 423 and calls == {}
+
+    unlock(client)
+    # missing token rejected up front
+    assert (
+        client.post("/api/providers", json={"name": "vb", "type": "vercel_blob"}).status_code
+        == 400
+    )
+
+    resp = client.post("/api/providers", json=full)
+    assert resp.status_code == 200, resp.text
+    assert calls["name"] == "vb" and calls["type"] == "vercel_blob"
+    # the token reached the flow as a static bearer blob
+    assert calls["blob"] == {"access_token": "vercel_rw_tok"}
+    assert any(p["name"] == "vb" for p in client.get("/api/providers").json())
+
+
 def test_export_zip_and_import_on_fresh_home(client, home, tmp_path):
     """Phase 4 via the API: export one zip, import it into a clean home,
     download byte-identical."""
