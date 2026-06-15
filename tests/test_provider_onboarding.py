@@ -232,6 +232,42 @@ def test_r2_onboarding_stores_keys_in_vault_and_bucket_in_register(env, monkeypa
     assert "SECRETXYZ" not in row["config"]
 
 
+def test_oracle_onboarding_stores_keys_in_vault_and_bucket_in_register(env, monkeypatch):
+    """Oracle Object Storage is secret-backed but not OAuth: the CLI prompts for
+    the namespace/region/bucket (non-secret) and the S3 access key/secret
+    (vault), and registers a row whose config carries the bucket but never the
+    secret."""
+
+    class OracleStub:
+        async def quota(self):
+            return Quota(total_bytes=None, used_bytes=0, confidence="unknown")
+
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: OracleStub())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "or", "--type", "oracle"],
+            # namespace, region, bucket, access key, secret
+            input="myns\nus-ashburn-1\nmybucket\nAKIDXYZ\nSECRETXYZ\n",
+        )
+    )
+    home = env / "home"
+    v = unlock_vault(home / "vault.json", PASS)
+    blob = v.get_secret("provider:or")
+    assert blob == {"access_key_id": "AKIDXYZ", "secret_access_key": "SECRETXYZ"}
+    assert "refresh_token" not in blob and "expires_at" not in blob
+    reg = Register(home / "register.db")
+    row = reg.get_provider_by_name("or")
+    config = json.loads(row["config"])
+    reg.close()
+    assert row["type"] == "oracle"
+    assert config["secret"] == "provider:or"
+    # non-secret location lands in the register (extra_config), the secret never
+    assert config["namespace"] == "myns" and config["region"] == "us-ashburn-1"
+    assert config["bucket"] == "mybucket"
+    assert "SECRETXYZ" not in row["config"]
+
+
 def test_failed_connection_test_rolls_back_the_secret(env, stub_oauth, monkeypatch):
     monkeypatch.setattr(
         onboarding,

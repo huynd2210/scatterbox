@@ -55,12 +55,15 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       body.email = email;
       body.app_password = appPassword;
       setMessage(`updating credentials for ${p.name}…`);
-    } else if (p.type === "r2") {
+    } else if (p.type === "r2" || p.type === "oracle") {
       // S3 access-key backend: re-prompt for just the key/secret (no browser);
-      // the account id + bucket on the register row are unchanged.
-      const accessKeyId = prompt(`R2 Access Key ID for ${p.name}`);
+      // the bucket/account on the register row are unchanged.
+      const label = p.type === "r2" ? "R2 Access Key ID" : "Oracle Access Key";
+      const accessKeyId = prompt(`${label} for ${p.name}`);
       if (!accessKeyId) return;
-      const secretAccessKey = prompt("R2 Secret Access Key");
+      const secretAccessKey = prompt(
+        p.type === "r2" ? "R2 Secret Access Key" : "Oracle Secret Key",
+      );
       if (!secretAccessKey) return;
       body.access_key_id = accessKeyId;
       body.secret_access_key = secretAccessKey;
@@ -88,6 +91,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
         if (
           p.type !== "koofr" &&
           p.type !== "r2" &&
+          p.type !== "oracle" &&
           !askCreds &&
           e.message.includes("client id")
         ) {
@@ -139,7 +143,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "dropbox" ||
             p.type === "pcloud" ||
             p.type === "koofr" ||
-            p.type === "r2"
+            p.type === "r2" ||
+            p.type === "oracle"
               ? () => reauth(p)
               : undefined
           }

@@ -57,6 +57,8 @@ export const api = {
     access_key_id?: string;
     secret_access_key?: string;
     account_id?: string;
+    namespace?: string;
+    region?: string;
     bucket?: string;
     name?: string;
   }) =>

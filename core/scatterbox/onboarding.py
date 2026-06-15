@@ -119,8 +119,8 @@ def onboard_secret_provider(
     row, with the same rollback as the OAuth path. Returns the tested quota.
 
     extra_config carries non-secret register config the adapter needs but does
-    not discover at runtime (an S3 backend's account id / bucket / endpoint);
-    it is merged into the register row, never the vault."""
+    not discover at runtime (an S3 backend's account id / namespace / region /
+    bucket / endpoint); it is merged into the register row, never the vault."""
     _ensure_name_free(register, name)
     return _store_test_register(
         register, vault, name, type_, blob, extra_config=extra_config,
@@ -142,8 +142,8 @@ def _store_test_register(
     """Shared onboarding tail: credential into the vault → live connection
     test → register row, rolling the secret back if anything fails after it
     was stored. Used by both the OAuth and app-password onboarding paths.
-    extra_config (non-secret, e.g. an S3 bucket/account) is merged into the
-    register row alongside the secret reference."""
+    extra_config (non-secret, e.g. an S3 bucket/account/namespace) is merged into
+    the register row alongside the secret reference."""
     secret_name = f"provider:{name}"
     vault.set_secret(secret_name, blob)
     config = {

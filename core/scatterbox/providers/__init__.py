@@ -29,6 +29,7 @@ from scatterbox.providers.gdrive import GDriveProvider
 from scatterbox.providers.koofr import KoofrProvider
 from scatterbox.providers.localfs import LocalFSProvider
 from scatterbox.providers.onedrive import OneDriveProvider
+from scatterbox.providers.oracle import OracleProvider
 from scatterbox.providers.pcloud import PCloudProvider
 from scatterbox.providers.r2 import R2Provider
 from scatterbox.vault import SecretStore
@@ -47,6 +48,7 @@ __all__ = [
     "PCloudProvider",
     "KoofrProvider",
     "R2Provider",
+    "OracleProvider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -169,6 +171,19 @@ def _r2_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _oracle_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return OracleProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        namespace=config["namespace"],
+        region=config["region"],
+        bucket=config["bucket"],
+        endpoint=config.get("endpoint"),
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
@@ -220,6 +235,14 @@ ADAPTERS: dict[str, AdapterSpec] = {
     # The non-secret account id + bucket live in the register config.
     "r2": AdapterSpec(
         factory=_r2_factory,
+        requires_secrets=True,
+    ),
+    # Oracle Cloud Object Storage (S3 Compatibility API) keeps an S3 access-key/
+    # secret pair in the vault and is NOT OAuth — no oauth_module, so it onboards
+    # via the S3-credential prompt path. The non-secret namespace, region, and
+    # bucket live in the register config.
+    "oracle": AdapterSpec(
+        factory=_oracle_factory,
         requires_secrets=True,
     ),
     # Future backends slot in here (see providers/_template.py):

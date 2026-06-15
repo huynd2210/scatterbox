@@ -124,14 +124,16 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
   const [accessKeyId, setAccessKeyId] = useState("");
   const [secretAccessKey, setSecretAccessKey] = useState("");
   const [accountId, setAccountId] = useState("");
+  const [namespace, setNamespace] = useState("");
+  const [region, setRegion] = useState("");
   const [bucket, setBucket] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string[] | null>(null);
 
-  // koofr recovers with an app password, r2 with an S3 access key pair +
-  // account/bucket, instead of an OAuth client id/secret.
+  // koofr recovers with an app password; the S3 backends with an access key
+  // pair + their location, instead of an OAuth client id/secret.
   const missingCreds =
     type === "localfs"
       ? !root
@@ -139,7 +141,9 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         ? !email || !appPassword
         : type === "r2"
           ? !accessKeyId || !secretAccessKey || !accountId || !bucket
-          : !clientId;
+          : type === "oracle"
+            ? !accessKeyId || !secretAccessKey || !namespace || !region || !bucket
+            : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -157,6 +161,8 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         access_key_id: accessKeyId || undefined,
         secret_access_key: secretAccessKey || undefined,
         account_id: accountId || undefined,
+        namespace: namespace || undefined,
+        region: region || undefined,
         bucket: bucket || undefined,
       })
       .then((result) => {
@@ -200,6 +206,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="pcloud">pCloud</option>
           <option value="koofr">Koofr</option>
           <option value="r2">Cloudflare R2</option>
+          <option value="oracle">Oracle Object Storage</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -207,6 +214,41 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             value={root}
             onChange={(e) => setRoot(e.target.value)}
           />
+        ) : type === "oracle" ? (
+          <>
+            <input
+              placeholder="Oracle object-storage namespace"
+              value={namespace}
+              onChange={(e) => setNamespace(e.target.value)}
+            />
+            <input
+              placeholder="Oracle region (e.g. us-ashburn-1)"
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+            />
+            <input
+              placeholder="Oracle bucket name"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+            />
+            <input
+              placeholder="Oracle Access Key"
+              value={accessKeyId}
+              onChange={(e) => setAccessKeyId(e.target.value)}
+            />
+            <input
+              type="password"
+              placeholder="Oracle Secret Key"
+              value={secretAccessKey}
+              onChange={(e) => setSecretAccessKey(e.target.value)}
+            />
+            <p className="muted small">
+              Oracle Object Storage uses a Customer Secret Key (an S3 access
+              key/secret), not OAuth — no browser consent. Create a fresh one in
+              the OCI console if the old one is gone with the machine.
+            </p>
+            <OracleGuide />
+          </>
         ) : type === "r2" ? (
           <>
             <input
@@ -665,6 +707,44 @@ function R2Guide() {
   );
 }
 
+/** Oracle Object Storage's walkthrough — its S3 Compatibility API isn't OAuth:
+ * you create a Customer Secret Key (an S3 Access Key + Secret Key) and a
+ * bucket, and the namespace + region locate the endpoint. */
+function OracleGuide() {
+  return (
+    <details className="setup-guide">
+      <summary>where do I get the Oracle keys? — step-by-step</summary>
+      <ol>
+        <li>
+          In the{" "}
+          <a href="https://cloud.oracle.com" target="_blank" rel="noreferrer">
+            OCI console
+          </a>{" "}
+          open <em>Storage → Buckets</em>, create a bucket, and note its{" "}
+          <strong>namespace</strong> and <strong>region</strong> (both shown on
+          the bucket page).
+        </li>
+        <li>
+          Open your <em>profile → Customer Secret Keys → Generate Secret Key</em>
+          ; copy the <strong>Access Key</strong> and the <strong>Secret Key</strong>{" "}
+          (the secret is shown once).
+        </li>
+        <li>
+          Paste the namespace, region, bucket, and key/secret into this form. No
+          OAuth app, no client id/secret, no browser consent.
+        </li>
+      </ol>
+      <p className="muted">
+        scatterbox talks to Oracle's S3 Compatibility API (requests are SigV4
+        signed) and stores everything under a <code>scatterbox/</code> key prefix
+        in the bucket (chunks are encrypted before upload). The Customer Secret
+        Key is revocable: delete it in the same screen and run <em>reauth</em> to
+        swap in a fresh key/secret.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -677,12 +757,14 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [accessKeyId, setAccessKeyId] = useState("");
   const [secretAccessKey, setSecretAccessKey] = useState("");
   const [accountId, setAccountId] = useState("");
+  const [namespace, setNamespace] = useState("");
+  const [region, setRegion] = useState("");
   const [bucket, setBucket] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // koofr (app password) and r2 (an S3 access key pair + account/bucket) are
-  // secret-backed but not OAuth: no browser consent.
+  // koofr (app password) and the S3 backends (an access key pair + their
+  // location) are secret-backed but not OAuth: no browser consent.
   const missingCreds =
     type === "localfs"
       ? !root
@@ -690,7 +772,9 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         ? !email || !appPassword
         : type === "r2"
           ? !accessKeyId || !secretAccessKey || !accountId || !bucket
-          : !clientId;
+          : type === "oracle"
+            ? !accessKeyId || !secretAccessKey || !namespace || !region || !bucket
+            : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -708,6 +792,8 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         access_key_id: accessKeyId || undefined,
         secret_access_key: secretAccessKey || undefined,
         account_id: accountId || undefined,
+        namespace: namespace || undefined,
+        region: region || undefined,
         bucket: bucket || undefined,
       })
       .then(() => {
@@ -735,6 +821,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="pcloud">pCloud</option>
           <option value="koofr">Koofr</option>
           <option value="r2">Cloudflare R2</option>
+          <option value="oracle">Oracle Object Storage</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -784,6 +871,41 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
             one in the R2 dashboard and paste it here.
           </p>
           <R2Guide />
+        </>
+      ) : type === "oracle" ? (
+        <>
+          <input
+            placeholder="Oracle object-storage namespace"
+            value={namespace}
+            onChange={(e) => setNamespace(e.target.value)}
+          />
+          <input
+            placeholder="Oracle region (e.g. us-ashburn-1)"
+            value={region}
+            onChange={(e) => setRegion(e.target.value)}
+          />
+          <input
+            placeholder="Oracle bucket name"
+            value={bucket}
+            onChange={(e) => setBucket(e.target.value)}
+          />
+          <input
+            placeholder="Oracle Access Key"
+            value={accessKeyId}
+            onChange={(e) => setAccessKeyId(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Oracle Secret Key"
+            value={secretAccessKey}
+            onChange={(e) => setSecretAccessKey(e.target.value)}
+          />
+          <p className="muted small">
+            Oracle Object Storage uses a Customer Secret Key (an S3 access
+            key/secret), not OAuth — no app to register and no browser consent.
+            Create one in the OCI console and paste it here.
+          </p>
+          <OracleGuide />
         </>
       ) : type === "koofr" ? (
         <>
@@ -847,7 +969,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
       <div className="form-row">
         <button disabled={busy || !name || missingCreds}>
           {busy
-            ? type === "localfs" || type === "koofr" || type === "r2"
+            ? type === "localfs" || type === "koofr" || type === "r2" || type === "oracle"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}

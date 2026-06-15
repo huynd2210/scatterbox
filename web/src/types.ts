@@ -99,18 +99,20 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr" | "r2";
+  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr" | "r2" | "oracle";
   root?: string;
   client_id?: string;
   client_secret?: string;
   // koofr authenticates with an app password (HTTP Basic), not OAuth.
   email?: string;
   app_password?: string;
-  // r2 (Cloudflare, S3-compatible) authenticates with an S3 access key pair;
-  // account_id + bucket are non-secret config.
+  // r2/oracle (S3-compatible) authenticate with an S3 access key pair; their
+  // non-secret config is account_id (r2) or namespace + region (oracle), + bucket.
   access_key_id?: string;
   secret_access_key?: string;
   account_id?: string;
+  namespace?: string;
+  region?: string;
   bucket?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
