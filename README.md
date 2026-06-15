@@ -127,7 +127,7 @@ in background jobs, never in a request you're waiting on. The daemon binds
 Most provider types need a one-time (free) OAuth app registration — Google
 and Microsoft don't let software talk to their APIs anonymously. Koofr and the
 S3-compatible backends are the exceptions: Koofr uses a self-serve **app
-password**, and Cloudflare R2 / Oracle Object Storage an **S3 access
+password**, and Cloudflare R2 / Oracle Object Storage / Tigris an **S3 access
 key/secret**, neither needing an OAuth app. Short version (details: TASKS.md §7):
 
 - **Google Drive:** create a project at console.cloud.google.com, enable the
@@ -163,6 +163,11 @@ key/secret**, neither needing an OAuth app. Short version (details: TASKS.md §7
   key's **Access Key + Secret Key**. Oracle speaks the S3 API (requests are AWS
   SigV4 signed); the key/secret are revocable — delete one and run
   `provider reauth` to update it.
+- **Tigris:** no OAuth. Create a bucket in the Tigris dashboard (storage.new),
+  then an *Access Key* scoped to it; `provider add` prompts for the bucket and
+  the key's **Access Key ID + Secret Access Key**. Tigris speaks the S3 API at a
+  single global endpoint (requests are AWS SigV4 signed); the key/secret are
+  revocable — rotate one and run `provider reauth` to update it.
 
 Then either add them in the web UI (providers tab → add provider — a
 consent tab opens in your browser) or via the CLI:
@@ -175,6 +180,7 @@ uv run scatterbox provider add pc --type pcloud     # prompts id/secret, opens b
 uv run scatterbox provider add kf --type koofr      # prompts email + app password, no browser
 uv run scatterbox provider add r2 --type r2         # prompts account/bucket + S3 key/secret, no browser
 uv run scatterbox provider add or --type oracle     # prompts namespace/region/bucket + S3 key/secret
+uv run scatterbox provider add tg --type tigris     # prompts bucket + S3 key/secret, no browser
 uv run scatterbox provider list                     # real quota, confidence-labelled
 ```
 
@@ -184,11 +190,11 @@ created (`drive.file` / the OneDrive and Dropbox app folders) — never the
 rest of your account. pCloud and Koofr are the exceptions — they grant
 whole-account access — so scatterbox confines itself to a single visible
 `scatterbox/` folder there (and every chunk is encrypted before upload
-regardless). The S3 backends are bucket-scoped: Cloudflare R2's API token only
-reaches the bucket you grant it, and while Oracle's Customer Secret Key reaches
-your whole tenancy scatterbox only touches the one bucket you configure — both
-keep their objects under a `scatterbox/` key prefix (every chunk encrypted
-before upload regardless).
+regardless). The S3 backends are bucket-scoped: Cloudflare R2's and Tigris's
+access keys only reach the bucket you grant them, and while Oracle's Customer
+Secret Key reaches your whole tenancy scatterbox only touches the one bucket you
+configure — all keep their objects under a `scatterbox/` key prefix (every chunk
+encrypted before upload regardless).
 
 Per-instance limits are user-configurable and always respected:
 

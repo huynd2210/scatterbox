@@ -143,7 +143,9 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           ? !accessKeyId || !secretAccessKey || !accountId || !bucket
           : type === "oracle"
             ? !accessKeyId || !secretAccessKey || !namespace || !region || !bucket
-            : !clientId;
+            : type === "tigris"
+              ? !accessKeyId || !secretAccessKey || !bucket
+              : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -207,6 +209,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="koofr">Koofr</option>
           <option value="r2">Cloudflare R2</option>
           <option value="oracle">Oracle Object Storage</option>
+          <option value="tigris">Tigris</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -248,6 +251,31 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
               the OCI console if the old one is gone with the machine.
             </p>
             <OracleGuide />
+          </>
+        ) : type === "tigris" ? (
+          <>
+            <input
+              placeholder="Tigris bucket name"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+            />
+            <input
+              placeholder="Tigris Access Key ID"
+              value={accessKeyId}
+              onChange={(e) => setAccessKeyId(e.target.value)}
+            />
+            <input
+              type="password"
+              placeholder="Tigris Secret Access Key"
+              value={secretAccessKey}
+              onChange={(e) => setSecretAccessKey(e.target.value)}
+            />
+            <p className="muted small">
+              Tigris uses an S3 access key (Access Key ID + Secret Access Key),
+              not OAuth — no browser consent. Create a fresh one in the Tigris
+              dashboard if the old one is gone with the machine.
+            </p>
+            <TigrisGuide />
           </>
         ) : type === "r2" ? (
           <>
@@ -745,6 +773,42 @@ function OracleGuide() {
   );
 }
 
+/** Tigris's walkthrough — Tigris isn't OAuth either: you create an
+ * S3-compatible access key (Access Key ID + Secret Access Key) and a bucket;
+ * the endpoint is fixed (one global endpoint). */
+function TigrisGuide() {
+  return (
+    <details className="setup-guide">
+      <summary>where do I get the Tigris keys? — step-by-step</summary>
+      <ol>
+        <li>
+          Sign in at{" "}
+          <a href="https://storage.new" target="_blank" rel="noreferrer">
+            storage.new
+          </a>{" "}
+          (the Tigris dashboard) and create a bucket (note its globally-unique
+          name).
+        </li>
+        <li>
+          Open <em>Access Keys → Create Access Key</em> (scope it to that bucket
+          with read &amp; write), and create it.
+        </li>
+        <li>
+          Copy the <strong>Access Key ID</strong> and{" "}
+          <strong>Secret Access Key</strong> it shows (the secret is shown once).
+        </li>
+      </ol>
+      <p className="muted">
+        scatterbox talks to Tigris's S3 API (requests are SigV4 signed) and
+        stores everything under a <code>scatterbox/</code> key prefix in the
+        bucket (chunks are encrypted before upload). The key is revocable: revoke
+        it in the same screen and run <em>reauth</em> to swap in a fresh
+        key/secret.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -774,7 +838,9 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           ? !accessKeyId || !secretAccessKey || !accountId || !bucket
           : type === "oracle"
             ? !accessKeyId || !secretAccessKey || !namespace || !region || !bucket
-            : !clientId;
+            : type === "tigris"
+              ? !accessKeyId || !secretAccessKey || !bucket
+              : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -822,6 +888,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="koofr">Koofr</option>
           <option value="r2">Cloudflare R2</option>
           <option value="oracle">Oracle Object Storage</option>
+          <option value="tigris">Tigris</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -907,6 +974,31 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           </p>
           <OracleGuide />
         </>
+      ) : type === "tigris" ? (
+        <>
+          <input
+            placeholder="Tigris bucket name"
+            value={bucket}
+            onChange={(e) => setBucket(e.target.value)}
+          />
+          <input
+            placeholder="Tigris Access Key ID"
+            value={accessKeyId}
+            onChange={(e) => setAccessKeyId(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Tigris Secret Access Key"
+            value={secretAccessKey}
+            onChange={(e) => setSecretAccessKey(e.target.value)}
+          />
+          <p className="muted small">
+            Tigris uses an S3 access key (Access Key ID + Secret Access Key),
+            not OAuth — no app to register and no browser consent. Create one in
+            the Tigris dashboard and paste it here.
+          </p>
+          <TigrisGuide />
+        </>
       ) : type === "koofr" ? (
         <>
           <input
@@ -969,7 +1061,11 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
       <div className="form-row">
         <button disabled={busy || !name || missingCreds}>
           {busy
-            ? type === "localfs" || type === "koofr" || type === "r2" || type === "oracle"
+            ? type === "localfs" ||
+              type === "koofr" ||
+              type === "r2" ||
+              type === "oracle" ||
+              type === "tigris"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}

@@ -13,6 +13,7 @@ To run, onboard a provider into a dedicated scatterbox home first:
     set SCATTERBOX_TEST_KOOFR=kf
     set SCATTERBOX_TEST_R2=r2
     set SCATTERBOX_TEST_ORACLE=or
+    set SCATTERBOX_TEST_TIGRIS=tg
     uv run pytest tests/test_real_providers.py -v
 
 Each test stores a small file pinned to that single provider (replicas=1),
@@ -125,3 +126,11 @@ def test_r2_real_roundtrip(tmp_path):
 )
 def test_oracle_real_roundtrip(tmp_path):
     _roundtrip(os.environ["SCATTERBOX_TEST_ORACLE"], tmp_path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCATTERBOX_TEST_TIGRIS"),
+    reason="set SCATTERBOX_TEST_TIGRIS=<provider name> to run against Tigris",
+)
+def test_tigris_real_roundtrip(tmp_path):
+    _roundtrip(os.environ["SCATTERBOX_TEST_TIGRIS"], tmp_path)

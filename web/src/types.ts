@@ -99,15 +99,25 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr" | "r2" | "oracle";
+  type:
+    | "localfs"
+    | "gdrive"
+    | "onedrive"
+    | "dropbox"
+    | "pcloud"
+    | "koofr"
+    | "r2"
+    | "oracle"
+    | "tigris";
   root?: string;
   client_id?: string;
   client_secret?: string;
   // koofr authenticates with an app password (HTTP Basic), not OAuth.
   email?: string;
   app_password?: string;
-  // r2/oracle (S3-compatible) authenticate with an S3 access key pair; their
-  // non-secret config is account_id (r2) or namespace + region (oracle), + bucket.
+  // r2/oracle/tigris (S3-compatible) authenticate with an S3 access key pair;
+  // their non-secret config is account_id (r2) / namespace + region (oracle) /
+  // nothing extra (tigris), + bucket.
   access_key_id?: string;
   secret_access_key?: string;
   account_id?: string;

@@ -481,10 +481,63 @@ def _onboard_oracle(
     typer.echo(f"added provider {name} (oracle{free})")
 
 
+def _prompt_tigris_blob() -> dict:
+    """Prompt for Tigris's S3 access key pair and build the vault blob.
+
+    Tigris has no OAuth: you create an access key in the Tigris dashboard, which
+    yields an Access Key ID + Secret Access Key. Only the key/secret are secret
+    (stored in the vault); the bucket is prompted separately as non-secret
+    config (the endpoint is fixed). Reused by add/reauth/recover."""
+    from scatterbox.providers.tigris import credential_blob
+
+    typer.echo(
+        "Tigris uses an S3 access key (storage.new -> your bucket -> Access "
+        "Keys). Paste its Access Key ID and Secret Access Key."
+    )
+    access_key_id = typer.prompt("Tigris Access Key ID")
+    secret_access_key = typer.prompt("Tigris Secret Access Key", hide_input=True)
+    return credential_blob(access_key_id, secret_access_key)
+
+
+def _prompt_tigris_location() -> dict:
+    """Prompt for Tigris's non-secret config (the globally-unique bucket name)
+    — the only register config it needs (the endpoint is fixed). Reused by add
+    and cold recovery."""
+    bucket = typer.prompt("Tigris bucket name")
+    return {"bucket": bucket}
+
+
+def _onboard_tigris(
+    register: Register,
+    name: str,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> None:
+    """CLI front-end for Tigris (S3 access key) onboarding: prompt here, shared
+    store/test/register flow in scatterbox.onboarding."""
+    location = _prompt_tigris_location()
+    blob = _prompt_tigris_blob()
+    v = _unlock()
+    quota = onboarding.onboard_secret_provider(
+        register,
+        v,
+        name,
+        "tigris",
+        blob=blob,
+        extra_config=location,
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
+    )
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} (tigris{free})")
+
+
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle | tigris")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
@@ -547,6 +600,16 @@ def provider_add(
             else:
                 _fail(f"provider {name!r} already exists")
             _onboard_oracle(register, name, max_object_bytes, capacity_bytes)
+        elif type_ == "tigris":
+            # S3 access-key backend (not OAuth): its own credential prompt, no
+            # browser consent. Fail on a duplicate name before prompting.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_tigris(register, name, max_object_bytes, capacity_bytes)
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
     except ScatterboxError as exc:
@@ -600,6 +663,7 @@ def provider_reauth(
             "koofr": _prompt_koofr_blob,
             "r2": _prompt_r2_blob,
             "oracle": _prompt_oracle_blob,
+            "tigris": _prompt_tigris_blob,
         }
         if ptype in secret_reauth_prompts:
             # Secret backends (no browser): re-prompt for just the credential —
@@ -845,7 +909,7 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle | tigris.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
@@ -907,6 +971,15 @@ def recover(
             blob = _prompt_oracle_blob()
             provider = create_provider(
                 "oracle", {"secret": "recovery", **location},
+                vault.MemorySecretStore(recovery=blob),
+            )
+        elif type_ == "tigris":
+            # S3 access-key backend: prompt for the bucket (to locate the
+            # snapshot) and the key/secret, then recover and adopt.
+            location = _prompt_tigris_location()
+            blob = _prompt_tigris_blob()
+            provider = create_provider(
+                "tigris", {"secret": "recovery", **location},
                 vault.MemorySecretStore(recovery=blob),
             )
         else:

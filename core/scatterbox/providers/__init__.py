@@ -32,6 +32,7 @@ from scatterbox.providers.onedrive import OneDriveProvider
 from scatterbox.providers.oracle import OracleProvider
 from scatterbox.providers.pcloud import PCloudProvider
 from scatterbox.providers.r2 import R2Provider
+from scatterbox.providers.tigris import TigrisProvider
 from scatterbox.vault import SecretStore
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "KoofrProvider",
     "R2Provider",
     "OracleProvider",
+    "TigrisProvider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -184,6 +186,17 @@ def _oracle_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _tigris_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return TigrisProvider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        bucket=config["bucket"],
+        endpoint=config.get("endpoint"),
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
@@ -243,6 +256,13 @@ ADAPTERS: dict[str, AdapterSpec] = {
     # bucket live in the register config.
     "oracle": AdapterSpec(
         factory=_oracle_factory,
+        requires_secrets=True,
+    ),
+    # Tigris keeps an S3 access-key/secret pair in the vault and is NOT OAuth —
+    # no oauth_module, so it onboards via the S3-credential prompt path. The
+    # endpoint is fixed, so only the non-secret bucket is register config.
+    "tigris": AdapterSpec(
+        factory=_tigris_factory,
         requires_secrets=True,
     ),
     # Future backends slot in here (see providers/_template.py):

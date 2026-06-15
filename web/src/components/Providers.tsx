@@ -55,15 +55,24 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       body.email = email;
       body.app_password = appPassword;
       setMessage(`updating credentials for ${p.name}…`);
-    } else if (p.type === "r2" || p.type === "oracle") {
+    } else if (p.type === "r2" || p.type === "oracle" || p.type === "tigris") {
       // S3 access-key backend: re-prompt for just the key/secret (no browser);
       // the bucket/account on the register row are unchanged.
-      const label = p.type === "r2" ? "R2 Access Key ID" : "Oracle Access Key";
-      const accessKeyId = prompt(`${label} for ${p.name}`);
+      const keyLabel =
+        p.type === "r2"
+          ? "R2 Access Key ID"
+          : p.type === "oracle"
+            ? "Oracle Access Key"
+            : "Tigris Access Key ID";
+      const secretLabel =
+        p.type === "r2"
+          ? "R2 Secret Access Key"
+          : p.type === "oracle"
+            ? "Oracle Secret Key"
+            : "Tigris Secret Access Key";
+      const accessKeyId = prompt(`${keyLabel} for ${p.name}`);
       if (!accessKeyId) return;
-      const secretAccessKey = prompt(
-        p.type === "r2" ? "R2 Secret Access Key" : "Oracle Secret Key",
-      );
+      const secretAccessKey = prompt(secretLabel);
       if (!secretAccessKey) return;
       body.access_key_id = accessKeyId;
       body.secret_access_key = secretAccessKey;
@@ -92,6 +101,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
           p.type !== "koofr" &&
           p.type !== "r2" &&
           p.type !== "oracle" &&
+          p.type !== "tigris" &&
           !askCreds &&
           e.message.includes("client id")
         ) {
@@ -144,7 +154,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "pcloud" ||
             p.type === "koofr" ||
             p.type === "r2" ||
-            p.type === "oracle"
+            p.type === "oracle" ||
+            p.type === "tigris"
               ? () => reauth(p)
               : undefined
           }

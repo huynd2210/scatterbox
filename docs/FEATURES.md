@@ -95,7 +95,13 @@ objects; authenticates with a Customer Secret Key — an S3 access key/secret �
 signed with AWS SigV4, not OAuth, static so a rejected key is a re-auth rather
 than a refresh. The namespace + region + bucket are non-secret register config;
 no free-space API, so quota is the configured cap if set ('estimated') else
-'unknown'. The same shared S3 core).
+'unknown'. The same shared S3 core),
+`tigris` (globally-distributed S3-compatible object storage at a single fixed
+endpoint: objects under a `scatterbox/` key prefix, single-PUT uploads,
+key-addressed objects; authenticates with an S3 access key/secret signed with
+AWS SigV4 — not OAuth — static, so a rejected key is a re-auth. Only the
+non-secret bucket is register config (the endpoint is fixed); same shared S3
+core, same quota behaviour).
 `chaos` exists for tests only (failure injection: 404s, corruption,
 latency, hard-kill).
 
@@ -295,7 +301,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `get VPATH LOCAL` | Restore byte-identically |
 | `ls [VPATH]`, `status VPATH`, `mv SRC DST`, `rm VPATH` | Browse / health / move / delete |
 | `scrub [--full --repair --probe-limit --deep-budget-bytes]` | Verify + heal |
-| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2\|oracle …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2/oracle) |
+| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2\|oracle\|tigris …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2/oracle/tigris) |
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |
