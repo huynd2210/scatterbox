@@ -11,6 +11,7 @@ To run, onboard a provider into a dedicated scatterbox home first:
     set SCATTERBOX_TEST_DROPBOX=db
     set SCATTERBOX_TEST_PCLOUD=pc
     set SCATTERBOX_TEST_KOOFR=kf
+    set SCATTERBOX_TEST_R2=r2
     uv run pytest tests/test_real_providers.py -v
 
 Each test stores a small file pinned to that single provider (replicas=1),
@@ -107,3 +108,11 @@ def test_pcloud_real_roundtrip(tmp_path):
 )
 def test_koofr_real_roundtrip(tmp_path):
     _roundtrip(os.environ["SCATTERBOX_TEST_KOOFR"], tmp_path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCATTERBOX_TEST_R2"),
+    reason="set SCATTERBOX_TEST_R2=<provider name> to run against Cloudflare R2",
+)
+def test_r2_real_roundtrip(tmp_path):
+    _roundtrip(os.environ["SCATTERBOX_TEST_R2"], tmp_path)

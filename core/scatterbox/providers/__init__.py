@@ -30,6 +30,7 @@ from scatterbox.providers.koofr import KoofrProvider
 from scatterbox.providers.localfs import LocalFSProvider
 from scatterbox.providers.onedrive import OneDriveProvider
 from scatterbox.providers.pcloud import PCloudProvider
+from scatterbox.providers.r2 import R2Provider
 from scatterbox.vault import SecretStore
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "DropboxProvider",
     "PCloudProvider",
     "KoofrProvider",
+    "R2Provider",
     "AdapterSpec",
     "ADAPTERS",
     "register_adapter",
@@ -155,6 +157,18 @@ def _koofr_factory(config: dict, secrets: SecretStore | None) -> Provider:
     )
 
 
+def _r2_factory(config: dict, secrets: SecretStore | None) -> Provider:
+    return R2Provider(
+        secrets=secrets,
+        secret_name=config["secret"],
+        account_id=config["account_id"],
+        bucket=config["bucket"],
+        endpoint=config.get("endpoint"),
+        max_object_bytes=config.get("max_object_bytes"),
+        capacity_bytes=config.get("capacity_bytes"),
+    )
+
+
 def _oauth_module(name: str) -> ModuleType:
     # local import keeps module load order simple (gdrive/onedrive import
     # from this package's submodules, not from this __init__)
@@ -199,6 +213,13 @@ ADAPTERS: dict[str, AdapterSpec] = {
     # prompt path, not the loopback consent flow.
     "koofr": AdapterSpec(
         factory=_koofr_factory,
+        requires_secrets=True,
+    ),
+    # Cloudflare R2 keeps an S3 access-key/secret pair in the vault and is NOT
+    # OAuth — no oauth_module, so it onboards via the S3-credential prompt path.
+    # The non-secret account id + bucket live in the register config.
+    "r2": AdapterSpec(
+        factory=_r2_factory,
         requires_secrets=True,
     ),
     # Future backends slot in here (see providers/_template.py):

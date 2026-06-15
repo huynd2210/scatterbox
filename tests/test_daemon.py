@@ -337,6 +337,48 @@ def test_koofr_provider_add_via_api(client, monkeypatch):
     assert any(p["name"] == "kf" for p in client.get("/api/providers").json())
 
 
+def test_r2_provider_add_via_api(client, monkeypatch):
+    """Cloudflare R2 is secret-backed but not OAuth: the endpoint takes an S3
+    access key/secret plus the (non-secret) account id + bucket, and hands the
+    shared flow the key blob and bucket extra_config, no browser."""
+    from scatterbox import onboarding
+
+    calls = {}
+
+    def fake_onboard(register, v, name, type_, **kwargs):
+        calls.update({"name": name, "type": type_, **kwargs})
+        register.add_provider(name, type_, {"secret": f"provider:{name}"})
+
+    monkeypatch.setattr(onboarding, "onboard_secret_provider", fake_onboard)
+    full = {
+        "name": "r2",
+        "type": "r2",
+        "account_id": "acct",
+        "bucket": "buck",
+        "access_key_id": "AKID",
+        "secret_access_key": "SEC",
+    }
+    # locked: refused before any credential is used
+    assert client.post("/api/providers", json=full).status_code == 423 and calls == {}
+
+    unlock(client)
+    # missing keys rejected up front (account/bucket present, no key/secret)
+    assert (
+        client.post(
+            "/api/providers", json={"name": "r2", "type": "r2", "account_id": "acct", "bucket": "buck"}
+        ).status_code
+        == 400
+    )
+
+    resp = client.post("/api/providers", json=full)
+    assert resp.status_code == 200, resp.text
+    assert calls["name"] == "r2" and calls["type"] == "r2"
+    # key/secret reached the flow as the vault blob; account/bucket as register config
+    assert calls["blob"] == {"access_key_id": "AKID", "secret_access_key": "SEC"}
+    assert calls["extra_config"] == {"account_id": "acct", "bucket": "buck"}
+    assert any(p["name"] == "r2" for p in client.get("/api/providers").json())
+
+
 def test_export_zip_and_import_on_fresh_home(client, home, tmp_path):
     """Phase 4 via the API: export one zip, import it into a clean home,
     download byte-identical."""

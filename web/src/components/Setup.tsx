@@ -121,18 +121,25 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
   const [clientSecret, setClientSecret] = useState("");
   const [email, setEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [bucket, setBucket] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string[] | null>(null);
 
-  // koofr recovers with an app password instead of an OAuth client id/secret.
+  // koofr recovers with an app password, r2 with an S3 access key pair +
+  // account/bucket, instead of an OAuth client id/secret.
   const missingCreds =
     type === "localfs"
       ? !root
       : type === "koofr"
         ? !email || !appPassword
-        : !clientId;
+        : type === "r2"
+          ? !accessKeyId || !secretAccessKey || !accountId || !bucket
+          : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,6 +154,10 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         client_secret: clientSecret || undefined,
         email: email || undefined,
         app_password: appPassword || undefined,
+        access_key_id: accessKeyId || undefined,
+        secret_access_key: secretAccessKey || undefined,
+        account_id: accountId || undefined,
+        bucket: bucket || undefined,
       })
       .then((result) => {
         if (result.pending_reauth.length > 0) {
@@ -188,6 +199,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="dropbox">Dropbox</option>
           <option value="pcloud">pCloud</option>
           <option value="koofr">Koofr</option>
+          <option value="r2">Cloudflare R2</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -195,6 +207,36 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             value={root}
             onChange={(e) => setRoot(e.target.value)}
           />
+        ) : type === "r2" ? (
+          <>
+            <input
+              placeholder="Cloudflare account id"
+              value={accountId}
+              onChange={(e) => setAccountId(e.target.value)}
+            />
+            <input
+              placeholder="R2 bucket name"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+            />
+            <input
+              placeholder="R2 Access Key ID"
+              value={accessKeyId}
+              onChange={(e) => setAccessKeyId(e.target.value)}
+            />
+            <input
+              type="password"
+              placeholder="R2 Secret Access Key"
+              value={secretAccessKey}
+              onChange={(e) => setSecretAccessKey(e.target.value)}
+            />
+            <p className="muted small">
+              Cloudflare R2 uses an S3 API token (Access Key ID + Secret Access
+              Key), not OAuth — no browser consent. Create a fresh token in the
+              R2 dashboard if the old one is gone with the machine.
+            </p>
+            <R2Guide />
+          </>
         ) : type === "koofr" ? (
           <>
             <input
@@ -585,6 +627,44 @@ function KoofrGuide() {
   );
 }
 
+/** Cloudflare R2's walkthrough — R2 isn't OAuth either: you create an
+ * S3-compatible API token (Access Key ID + Secret Access Key) scoped to a
+ * bucket. */
+function R2Guide() {
+  return (
+    <details className="setup-guide">
+      <summary>where do I get the R2 keys? — step-by-step</summary>
+      <ol>
+        <li>
+          In the{" "}
+          <a href="https://dash.cloudflare.com" target="_blank" rel="noreferrer">
+            Cloudflare dashboard
+          </a>{" "}
+          open <em>R2</em> and create a bucket (note its name).
+        </li>
+        <li>
+          Open <em>R2 → Manage R2 API Tokens → Create API token</em>, give it{" "}
+          <strong>Object Read &amp; Write</strong> on that bucket, and create it.
+        </li>
+        <li>
+          Copy the <strong>Access Key ID</strong> and{" "}
+          <strong>Secret Access Key</strong> it shows (the secret is shown once).
+        </li>
+        <li>
+          Your <strong>account id</strong> is on the R2 overview page (it forms
+          the endpoint <code>&lt;account&gt;.r2.cloudflarestorage.com</code>).
+        </li>
+      </ol>
+      <p className="muted">
+        scatterbox stores everything under a <code>scatterbox/</code> key prefix
+        in the bucket (chunks are encrypted before upload, requests are SigV4
+        signed). The token is scoped and revocable: revoke it in the same screen
+        and run <em>reauth</em> to swap in a fresh key/secret.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -594,16 +674,23 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [clientSecret, setClientSecret] = useState("");
   const [email, setEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [bucket, setBucket] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // koofr is secret-backed but not OAuth: app password, no browser consent.
+  // koofr (app password) and r2 (an S3 access key pair + account/bucket) are
+  // secret-backed but not OAuth: no browser consent.
   const missingCreds =
     type === "localfs"
       ? !root
       : type === "koofr"
         ? !email || !appPassword
-        : !clientId;
+        : type === "r2"
+          ? !accessKeyId || !secretAccessKey || !accountId || !bucket
+          : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -618,11 +705,16 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         client_secret: clientSecret || undefined,
         email: email || undefined,
         app_password: appPassword || undefined,
+        access_key_id: accessKeyId || undefined,
+        secret_access_key: secretAccessKey || undefined,
+        account_id: accountId || undefined,
+        bucket: bucket || undefined,
       })
       .then(() => {
         setName("");
         setRoot("");
         setAppPassword("");
+        setSecretAccessKey("");
         onAdded();
       })
       .catch((err: Error) => setError(err.message))
@@ -642,6 +734,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="dropbox">Dropbox</option>
           <option value="pcloud">pCloud</option>
           <option value="koofr">Koofr</option>
+          <option value="r2">Cloudflare R2</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -661,6 +754,36 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
             drive, a NAS/network mount. It is created if missing, and only
             encrypted chunks land in it.
           </p>
+        </>
+      ) : type === "r2" ? (
+        <>
+          <input
+            placeholder="Cloudflare account id"
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+          />
+          <input
+            placeholder="R2 bucket name"
+            value={bucket}
+            onChange={(e) => setBucket(e.target.value)}
+          />
+          <input
+            placeholder="R2 Access Key ID"
+            value={accessKeyId}
+            onChange={(e) => setAccessKeyId(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="R2 Secret Access Key"
+            value={secretAccessKey}
+            onChange={(e) => setSecretAccessKey(e.target.value)}
+          />
+          <p className="muted small">
+            Cloudflare R2 uses an S3 API token (Access Key ID + Secret Access
+            Key), not OAuth — no app to register and no browser consent. Create
+            one in the R2 dashboard and paste it here.
+          </p>
+          <R2Guide />
         </>
       ) : type === "koofr" ? (
         <>
@@ -724,7 +847,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
       <div className="form-row">
         <button disabled={busy || !name || missingCreds}>
           {busy
-            ? type === "localfs" || type === "koofr"
+            ? type === "localfs" || type === "koofr" || type === "r2"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}
