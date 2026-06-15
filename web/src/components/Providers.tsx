@@ -42,6 +42,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       client_secret?: string;
       email?: string;
       app_password?: string;
+      token?: string;
     } = {};
     if (p.type === "koofr") {
       // App-password backend: always re-prompt for the new credential (no
@@ -52,6 +53,12 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       if (!appPassword) return;
       body.email = email;
       body.app_password = appPassword;
+      setMessage(`updating credentials for ${p.name}…`);
+    } else if (p.type === "vercel_blob") {
+      // Token backend: re-prompt for the new read-write token (no browser).
+      const t = prompt(`Vercel Blob read-write token for ${p.name}`);
+      if (!t) return;
+      body.token = t;
       setMessage(`updating credentials for ${p.name}…`);
     } else {
       // First try reusing the stored client app credentials; the daemon asks
@@ -73,7 +80,12 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
         refresh();
       })
       .catch((e: Error) => {
-        if (p.type !== "koofr" && !askCreds && e.message.includes("client id")) {
+        if (
+          p.type !== "koofr" &&
+          p.type !== "vercel_blob" &&
+          !askCreds &&
+          e.message.includes("client id")
+        ) {
           reauth(p, true); // no stored credentials — ask the user
         } else {
           setMessage(e.message);
@@ -121,7 +133,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "onedrive" ||
             p.type === "dropbox" ||
             p.type === "pcloud" ||
-            p.type === "koofr"
+            p.type === "koofr" ||
+            p.type === "vercel_blob"
               ? () => reauth(p)
               : undefined
           }

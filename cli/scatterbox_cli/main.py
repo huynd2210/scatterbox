@@ -370,10 +370,51 @@ def _onboard_koofr(
     typer.echo(f"added provider {name} (koofr{free})")
 
 
+def _prompt_vercel_blob_blob() -> dict:
+    """Prompt for a Vercel Blob read-write token and build the vault blob.
+
+    Vercel Blob has no OAuth: you copy a Read-Write Token from the Vercel
+    dashboard (Storage -> your Blob store -> Tokens, the BLOB_READ_WRITE_TOKEN
+    value). It is a static bearer credential, stored in the vault. Reused by
+    add/reauth/recover."""
+    from scatterbox.providers.vercel_blob import credential_blob
+
+    typer.echo(
+        "Vercel Blob uses a Read-Write Token (Vercel dashboard -> Storage -> "
+        "your Blob store -> the BLOB_READ_WRITE_TOKEN value)."
+    )
+    token = typer.prompt("Vercel Blob read-write token", hide_input=True)
+    return credential_blob(token)
+
+
+def _onboard_vercel_blob(
+    register: Register,
+    name: str,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> None:
+    """CLI front-end for Vercel Blob (read-write token) onboarding: prompt here,
+    shared store/test/register flow in scatterbox.onboarding."""
+    v = _unlock()
+    quota = onboarding.onboard_secret_provider(
+        register,
+        v,
+        name,
+        "vercel_blob",
+        blob=_prompt_vercel_blob_blob(),
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
+    )
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} (vercel_blob{free})")
+
+
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | vercel_blob")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
@@ -416,6 +457,16 @@ def provider_add(
             else:
                 _fail(f"provider {name!r} already exists")
             _onboard_koofr(register, name, max_object_bytes, capacity_bytes)
+        elif type_ == "vercel_blob":
+            # Token backend (not OAuth): a single read-write token prompt, no
+            # browser consent. Fail on a duplicate name before prompting.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_vercel_blob(register, name, max_object_bytes, capacity_bytes)
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")
     except ScatterboxError as exc:
@@ -464,11 +515,13 @@ def provider_reauth(
     register = _open_register()
     try:
         v = _unlock()
-        if register.get_provider_by_name(name)["type"] == "koofr":
-            # App-password backend: re-prompt for the credential, no browser.
-            quota = onboarding.update_provider_secret(
-                register, v, name, _prompt_koofr_blob()
+        ptype = register.get_provider_by_name(name)["type"]
+        if ptype in ("koofr", "vercel_blob"):
+            # Secret backends (no browser): re-prompt for just the credential.
+            blob = (
+                _prompt_koofr_blob() if ptype == "koofr" else _prompt_vercel_blob_blob()
             )
+            quota = onboarding.update_provider_secret(register, v, name, blob)
         else:
             quota = onboarding.reauth_provider(
                 register,
@@ -707,7 +760,7 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | vercel_blob.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
@@ -752,6 +805,14 @@ def recover(
             blob = _prompt_koofr_blob()
             provider = create_provider(
                 "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+            )
+        elif type_ == "vercel_blob":
+            # Token backend: prompt for the read-write token, then recover and
+            # adopt it like the OAuth types.
+            blob = _prompt_vercel_blob_blob()
+            provider = create_provider(
+                "vercel_blob", {"secret": "recovery"},
+                vault.MemorySecretStore(recovery=blob),
             )
         else:
             _fail(f"unsupported provider type {type_!r} ({', '.join(known_types())})")

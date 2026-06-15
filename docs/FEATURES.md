@@ -82,7 +82,14 @@ the token blob; errors arrive as HTTP-200 `result` codes, not status codes),
 `koofr` (visible `scatterbox/` folder in the account's primary mount, single
 multipart uploads, path-addressed objects; authenticates with a self-serve
 app password over HTTP Basic — not OAuth — which is static, so a rejected one
-is a re-auth rather than a refresh).
+is a re-auth rather than a refresh),
+`vercel_blob` (Vercel Blob REST API: objects under a `scatterbox/` pathname
+prefix, single-request PUT uploads, the returned public URL is the ref;
+authenticates with a single static read-write token as a Bearer credential —
+not OAuth — so a rejected token is a re-auth rather than a refresh. Objects are
+served from public unguessable URLs, so get() fetches them without the bearer
+and exposure_risk is 'high'; no free-space API, so quota is the configured cap
+if set ('estimated') else 'unknown').
 `chaos` exists for tests only (failure injection: 404s, corruption,
 latency, hard-kill).
 
@@ -282,7 +289,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `get VPATH LOCAL` | Restore byte-identically |
 | `ls [VPATH]`, `status VPATH`, `mv SRC DST`, `rm VPATH` | Browse / health / move / delete |
 | `scrub [--full --repair --probe-limit --deep-budget-bytes]` | Verify + heal |
-| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr …` | Onboard (OAuth flow for cloud types; app password for koofr) |
+| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|vercel_blob …` | Onboard (OAuth for cloud types; app password for koofr; read-write token for vercel_blob) |
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |

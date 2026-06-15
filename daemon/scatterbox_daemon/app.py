@@ -253,6 +253,20 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 provider = create_provider(
                     "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
                 )
+            elif type_ == "vercel_blob":
+                from scatterbox.providers.vercel_blob import credential_blob
+
+                token = (body.get("token") or "").strip()
+                if not token:
+                    raise HTTPException(
+                        status_code=400, detail="Vercel Blob read-write token required"
+                    )
+                blob = credential_blob(token)
+                provider = create_provider(
+                    "vercel_blob",
+                    {"secret": "recovery"},
+                    vault.MemorySecretStore(recovery=blob),
+                )
             else:
                 raise HTTPException(
                     status_code=400,
@@ -295,7 +309,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             # and sqlite must not cross threads
             reg = Register(state.home / "register.db")
             try:
-                if reg.get_provider_by_name(name)["type"] == "koofr":
+                ptype = reg.get_provider_by_name(name)["type"]
+                if ptype == "koofr":
                     from scatterbox.providers.koofr import credential_blob
 
                     email = (body.get("email") or "").strip()
@@ -306,6 +321,15 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         )
                     return onboarding.update_provider_secret(
                         reg, state.vault, name, credential_blob(email, app_password)
+                    )
+                if ptype == "vercel_blob":
+                    from scatterbox.providers.vercel_blob import credential_blob
+
+                    token = (body.get("token") or "").strip()
+                    if not token:
+                        raise ScatterboxError("Vercel Blob read-write token required")
+                    return onboarding.update_provider_secret(
+                        reg, state.vault, name, credential_blob(token)
                     )
                 return onboarding.reauth_provider(
                     reg,
@@ -762,6 +786,30 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         reg.close()
 
                 await asyncio.to_thread(run_koofr_onboarding)
+            elif type_ == "vercel_blob":
+                _require_unlocked(state)
+                from scatterbox.providers.vercel_blob import credential_blob
+
+                token = (body.get("token") or "").strip()
+                if not token:
+                    raise HTTPException(
+                        status_code=400, detail="Vercel Blob read-write token required"
+                    )
+                blob = credential_blob(token)
+
+                def run_vercel_blob_onboarding() -> None:
+                    # Own register connection on the worker thread (the shared
+                    # onboarding flow does its connection test via asyncio.run,
+                    # which cannot run inside this event loop).
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_secret_provider(
+                            reg, state.vault, name, "vercel_blob", blob=blob, **limits
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_vercel_blob_onboarding)
             else:
                 raise HTTPException(
                     status_code=400,

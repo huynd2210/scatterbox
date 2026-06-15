@@ -99,13 +99,15 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr";
+  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr" | "vercel_blob";
   root?: string;
   client_id?: string;
   client_secret?: string;
   // koofr authenticates with an app password (HTTP Basic), not OAuth.
   email?: string;
   app_password?: string;
+  // vercel_blob authenticates with a single static read-write token (Bearer).
+  token?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
 }

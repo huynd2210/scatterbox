@@ -125,9 +125,10 @@ in background jobs, never in a request you're waiting on. The daemon binds
 ## Real providers
 
 Most provider types need a one-time (free) OAuth app registration — Google
-and Microsoft don't let software talk to their APIs anonymously. Koofr is the
-exception: it uses a self-serve **app password** instead (no app to register).
-Short version (details: TASKS.md §7):
+and Microsoft don't let software talk to their APIs anonymously. Koofr and
+Vercel Blob are the exceptions: Koofr uses a self-serve **app password** and
+Vercel Blob a single **read-write token**, neither needing an OAuth app. Short
+version (details: TASKS.md §7):
 
 - **Google Drive:** create a project at console.cloud.google.com, enable the
   Drive API, configure the consent screen (add yourself as test user,
@@ -150,17 +151,23 @@ Short version (details: TASKS.md §7):
   prompts for your account email + that app password (sent as HTTP Basic, the
   way rclone authenticates). App passwords are limited-scope and individually
   revocable; regenerate one and run `provider reauth` to update it.
+- **Vercel Blob:** no OAuth. In the Vercel dashboard create a *Blob* store
+  under Storage and copy its **BLOB_READ_WRITE_TOKEN**; `provider add` prompts
+  for that token (a static bearer credential). Roll the token in the dashboard
+  and run `provider reauth` to update it. Note Blob objects are served from
+  public, unguessable URLs — scatterbox's encryption is what keeps them private.
 
 Then either add them in the web UI (providers tab → add provider — a
 consent tab opens in your browser) or via the CLI:
 
 ```sh
-uv run scatterbox provider add gd --type gdrive     # prompts id/secret, opens browser
-uv run scatterbox provider add od --type onedrive   # prompts id, opens browser
-uv run scatterbox provider add db --type dropbox    # prompts app key, opens browser
-uv run scatterbox provider add pc --type pcloud     # prompts id/secret, opens browser
-uv run scatterbox provider add kf --type koofr      # prompts email + app password, no browser
-uv run scatterbox provider list                     # real quota, confidence-labelled
+uv run scatterbox provider add gd --type gdrive       # prompts id/secret, opens browser
+uv run scatterbox provider add od --type onedrive     # prompts id, opens browser
+uv run scatterbox provider add db --type dropbox      # prompts app key, opens browser
+uv run scatterbox provider add pc --type pcloud       # prompts id/secret, opens browser
+uv run scatterbox provider add kf --type koofr        # prompts email + app password, no browser
+uv run scatterbox provider add vb --type vercel_blob  # prompts read-write token, no browser
+uv run scatterbox provider list                       # real quota, confidence-labelled
 ```
 
 Tokens land in the encrypted vault, never in the register. Scopes are
@@ -169,7 +176,9 @@ created (`drive.file` / the OneDrive and Dropbox app folders) — never the
 rest of your account. pCloud and Koofr are the exceptions — they grant
 whole-account access — so scatterbox confines itself to a single visible
 `scatterbox/` folder there (and every chunk is encrypted before upload
-regardless).
+regardless). Vercel Blob's token is scoped to its one store, where scatterbox
+keeps objects under a `scatterbox/` pathname prefix (every chunk encrypted
+before upload regardless — important here, since Blob URLs are public).
 
 Per-instance limits are user-configurable and always respected:
 
