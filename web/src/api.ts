@@ -54,6 +54,9 @@ export const api = {
     client_secret?: string;
     email?: string;
     app_password?: string;
+    access_key_id?: string;
+    secret_access_key?: string;
+    bucket?: string;
     name?: string;
   }) =>
     request<{ files: number; adopted: string | null; pending_reauth: string[] }>(
@@ -62,7 +65,14 @@ export const api = {
     ),
   reauthProvider: (
     name: string,
-    body: { client_id?: string; client_secret?: string; email?: string; app_password?: string },
+    body: {
+      client_id?: string;
+      client_secret?: string;
+      email?: string;
+      app_password?: string;
+      access_key_id?: string;
+      secret_access_key?: string;
+    },
   ) => request(`/api/providers/${encodeURIComponent(name)}/reauth`, json(body)),
   unlock: (passphrase: string) => request("/api/unlock", json({ passphrase })),
   lock: () => request("/api/lock", { method: "POST" }),

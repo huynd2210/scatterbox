@@ -99,13 +99,18 @@ export interface FileDetail {
 
 export interface NewProvider {
   name: string;
-  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr";
+  type: "localfs" | "gdrive" | "onedrive" | "dropbox" | "pcloud" | "koofr" | "tigris";
   root?: string;
   client_id?: string;
   client_secret?: string;
   // koofr authenticates with an app password (HTTP Basic), not OAuth.
   email?: string;
   app_password?: string;
+  // tigris (S3-compatible) authenticates with an S3 access key pair; the bucket
+  // is non-secret config (the endpoint is fixed).
+  access_key_id?: string;
+  secret_access_key?: string;
+  bucket?: string;
   max_object_bytes?: number | null;
   capacity_bytes?: number | null;
 }

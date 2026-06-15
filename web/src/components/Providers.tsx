@@ -42,6 +42,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       client_secret?: string;
       email?: string;
       app_password?: string;
+      access_key_id?: string;
+      secret_access_key?: string;
     } = {};
     if (p.type === "koofr") {
       // App-password backend: always re-prompt for the new credential (no
@@ -52,6 +54,16 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       if (!appPassword) return;
       body.email = email;
       body.app_password = appPassword;
+      setMessage(`updating credentials for ${p.name}…`);
+    } else if (p.type === "tigris") {
+      // S3 access-key backend: re-prompt for just the key/secret (no browser);
+      // the bucket on the register row is unchanged.
+      const accessKeyId = prompt(`Tigris Access Key ID for ${p.name}`);
+      if (!accessKeyId) return;
+      const secretAccessKey = prompt("Tigris Secret Access Key");
+      if (!secretAccessKey) return;
+      body.access_key_id = accessKeyId;
+      body.secret_access_key = secretAccessKey;
       setMessage(`updating credentials for ${p.name}…`);
     } else {
       // First try reusing the stored client app credentials; the daemon asks
@@ -73,7 +85,12 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
         refresh();
       })
       .catch((e: Error) => {
-        if (p.type !== "koofr" && !askCreds && e.message.includes("client id")) {
+        if (
+          p.type !== "koofr" &&
+          p.type !== "tigris" &&
+          !askCreds &&
+          e.message.includes("client id")
+        ) {
           reauth(p, true); // no stored credentials — ask the user
         } else {
           setMessage(e.message);
@@ -121,7 +138,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "onedrive" ||
             p.type === "dropbox" ||
             p.type === "pcloud" ||
-            p.type === "koofr"
+            p.type === "koofr" ||
+            p.type === "tigris"
               ? () => reauth(p)
               : undefined
           }

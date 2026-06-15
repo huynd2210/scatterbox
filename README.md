@@ -125,9 +125,10 @@ in background jobs, never in a request you're waiting on. The daemon binds
 ## Real providers
 
 Most provider types need a one-time (free) OAuth app registration — Google
-and Microsoft don't let software talk to their APIs anonymously. Koofr is the
-exception: it uses a self-serve **app password** instead (no app to register).
-Short version (details: TASKS.md §7):
+and Microsoft don't let software talk to their APIs anonymously. Koofr and
+Tigris are the exceptions: Koofr uses a self-serve **app password** and Tigris
+an **S3 access key** (access key/secret), neither needing an OAuth app. Short
+version (details: TASKS.md §7):
 
 - **Google Drive:** create a project at console.cloud.google.com, enable the
   Drive API, configure the consent screen (add yourself as test user,
@@ -150,6 +151,11 @@ Short version (details: TASKS.md §7):
   prompts for your account email + that app password (sent as HTTP Basic, the
   way rclone authenticates). App passwords are limited-scope and individually
   revocable; regenerate one and run `provider reauth` to update it.
+- **Tigris:** no OAuth. Create a bucket in the Tigris dashboard
+  (storage.new), then an *Access Key* scoped to it; `provider add` prompts for
+  the bucket and the key's **Access Key ID + Secret Access Key**. Tigris speaks
+  the S3 API at a single global endpoint (requests are AWS SigV4 signed); the
+  key/secret are revocable — rotate one and run `provider reauth` to update it.
 
 Then either add them in the web UI (providers tab → add provider — a
 consent tab opens in your browser) or via the CLI:
@@ -160,6 +166,7 @@ uv run scatterbox provider add od --type onedrive   # prompts id, opens browser
 uv run scatterbox provider add db --type dropbox    # prompts app key, opens browser
 uv run scatterbox provider add pc --type pcloud     # prompts id/secret, opens browser
 uv run scatterbox provider add kf --type koofr      # prompts email + app password, no browser
+uv run scatterbox provider add tg --type tigris     # prompts bucket + S3 key/secret, no browser
 uv run scatterbox provider list                     # real quota, confidence-labelled
 ```
 
@@ -169,7 +176,9 @@ created (`drive.file` / the OneDrive and Dropbox app folders) — never the
 rest of your account. pCloud and Koofr are the exceptions — they grant
 whole-account access — so scatterbox confines itself to a single visible
 `scatterbox/` folder there (and every chunk is encrypted before upload
-regardless).
+regardless). Tigris is bucket-scoped: the access key only reaches the one
+bucket you grant it, and scatterbox keeps its objects under a `scatterbox/` key
+prefix (every chunk encrypted before upload regardless).
 
 Per-instance limits are user-configurable and always respected:
 

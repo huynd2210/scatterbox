@@ -253,6 +253,23 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 provider = create_provider(
                     "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
                 )
+            elif type_ == "tigris":
+                from scatterbox.providers.tigris import credential_blob
+
+                access_key_id = (body.get("access_key_id") or "").strip()
+                secret_access_key = body.get("secret_access_key") or ""
+                bucket = (body.get("bucket") or "").strip()
+                if not (access_key_id and secret_access_key and bucket):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Tigris bucket, access key id and secret access key required",
+                    )
+                blob = credential_blob(access_key_id, secret_access_key)
+                provider = create_provider(
+                    "tigris",
+                    {"secret": "recovery", "bucket": bucket},
+                    vault.MemorySecretStore(recovery=blob),
+                )
             else:
                 raise HTTPException(
                     status_code=400,
@@ -295,7 +312,8 @@ def create_app(home: Path | str | None = None) -> FastAPI:
             # and sqlite must not cross threads
             reg = Register(state.home / "register.db")
             try:
-                if reg.get_provider_by_name(name)["type"] == "koofr":
+                ptype = reg.get_provider_by_name(name)["type"]
+                if ptype == "koofr":
                     from scatterbox.providers.koofr import credential_blob
 
                     email = (body.get("email") or "").strip()
@@ -306,6 +324,21 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         )
                     return onboarding.update_provider_secret(
                         reg, state.vault, name, credential_blob(email, app_password)
+                    )
+                if ptype == "tigris":
+                    from scatterbox.providers.tigris import credential_blob
+
+                    access_key_id = (body.get("access_key_id") or "").strip()
+                    secret_access_key = body.get("secret_access_key") or ""
+                    if not access_key_id or not secret_access_key:
+                        raise ScatterboxError(
+                            "Tigris access key id and secret access key required"
+                        )
+                    return onboarding.update_provider_secret(
+                        reg,
+                        state.vault,
+                        name,
+                        credential_blob(access_key_id, secret_access_key),
                     )
                 return onboarding.reauth_provider(
                     reg,
@@ -762,6 +795,40 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         reg.close()
 
                 await asyncio.to_thread(run_koofr_onboarding)
+            elif type_ == "tigris":
+                _require_unlocked(state)
+                from scatterbox.providers.tigris import credential_blob
+
+                access_key_id = (body.get("access_key_id") or "").strip()
+                secret_access_key = body.get("secret_access_key") or ""
+                bucket = (body.get("bucket") or "").strip()
+                if not (access_key_id and secret_access_key and bucket):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Tigris bucket, access key id and secret access key required",
+                    )
+                blob = credential_blob(access_key_id, secret_access_key)
+                extra_config = {"bucket": bucket}
+
+                def run_tigris_onboarding() -> None:
+                    # Own register connection on the worker thread (the shared
+                    # onboarding flow does its connection test via asyncio.run,
+                    # which cannot run inside this event loop).
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_secret_provider(
+                            reg,
+                            state.vault,
+                            name,
+                            "tigris",
+                            blob=blob,
+                            extra_config=extra_config,
+                            **limits,
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_tigris_onboarding)
             else:
                 raise HTTPException(
                     status_code=400,

@@ -121,18 +121,24 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
   const [clientSecret, setClientSecret] = useState("");
   const [email, setEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [bucket, setBucket] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string[] | null>(null);
 
-  // koofr recovers with an app password instead of an OAuth client id/secret.
+  // koofr recovers with an app password, tigris with an S3 access key pair +
+  // bucket, instead of an OAuth client id/secret.
   const missingCreds =
     type === "localfs"
       ? !root
       : type === "koofr"
         ? !email || !appPassword
-        : !clientId;
+        : type === "tigris"
+          ? !accessKeyId || !secretAccessKey || !bucket
+          : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,6 +153,9 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
         client_secret: clientSecret || undefined,
         email: email || undefined,
         app_password: appPassword || undefined,
+        access_key_id: accessKeyId || undefined,
+        secret_access_key: secretAccessKey || undefined,
+        bucket: bucket || undefined,
       })
       .then((result) => {
         if (result.pending_reauth.length > 0) {
@@ -188,6 +197,7 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
           <option value="dropbox">Dropbox</option>
           <option value="pcloud">pCloud</option>
           <option value="koofr">Koofr</option>
+          <option value="tigris">Tigris</option>
         </select>
         {type === "localfs" ? (
           <input
@@ -195,6 +205,31 @@ function RecoverStep({ onDone, onBack }: { onDone: () => void; onBack: () => voi
             value={root}
             onChange={(e) => setRoot(e.target.value)}
           />
+        ) : type === "tigris" ? (
+          <>
+            <input
+              placeholder="Tigris bucket name"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+            />
+            <input
+              placeholder="Tigris Access Key ID"
+              value={accessKeyId}
+              onChange={(e) => setAccessKeyId(e.target.value)}
+            />
+            <input
+              type="password"
+              placeholder="Tigris Secret Access Key"
+              value={secretAccessKey}
+              onChange={(e) => setSecretAccessKey(e.target.value)}
+            />
+            <p className="muted small">
+              Tigris uses an S3 access key (Access Key ID + Secret Access Key),
+              not OAuth — no browser consent. Create a fresh one in the Tigris
+              dashboard if the old one is gone with the machine.
+            </p>
+            <TigrisGuide />
+          </>
         ) : type === "koofr" ? (
           <>
             <input
@@ -585,6 +620,42 @@ function KoofrGuide() {
   );
 }
 
+/** Tigris's walkthrough — Tigris isn't OAuth either: you create an
+ * S3-compatible access key (Access Key ID + Secret Access Key) and a bucket;
+ * the endpoint is fixed (one global endpoint). */
+function TigrisGuide() {
+  return (
+    <details className="setup-guide">
+      <summary>where do I get the Tigris keys? — step-by-step</summary>
+      <ol>
+        <li>
+          Sign in at{" "}
+          <a href="https://storage.new" target="_blank" rel="noreferrer">
+            storage.new
+          </a>{" "}
+          (the Tigris dashboard) and create a bucket (note its globally-unique
+          name).
+        </li>
+        <li>
+          Open <em>Access Keys → Create Access Key</em> (scope it to that bucket
+          with read &amp; write), and create it.
+        </li>
+        <li>
+          Copy the <strong>Access Key ID</strong> and{" "}
+          <strong>Secret Access Key</strong> it shows (the secret is shown once).
+        </li>
+      </ol>
+      <p className="muted">
+        scatterbox talks to Tigris's S3 API (requests are SigV4 signed) and
+        stores everything under a <code>scatterbox/</code> key prefix in the
+        bucket (chunks are encrypted before upload). The key is revocable: revoke
+        it in the same screen and run <em>reauth</em> to swap in a fresh
+        key/secret.
+      </p>
+    </details>
+  );
+}
+
 /** Add-provider form, shared between the wizard and the providers tab. */
 export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [type, setType] = useState<NewProvider["type"]>("localfs");
@@ -594,16 +665,22 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
   const [clientSecret, setClientSecret] = useState("");
   const [email, setEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
+  const [bucket, setBucket] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // koofr is secret-backed but not OAuth: app password, no browser consent.
+  // koofr (app password) and tigris (an S3 access key pair + bucket) are
+  // secret-backed but not OAuth: no browser consent.
   const missingCreds =
     type === "localfs"
       ? !root
       : type === "koofr"
         ? !email || !appPassword
-        : !clientId;
+        : type === "tigris"
+          ? !accessKeyId || !secretAccessKey || !bucket
+          : !clientId;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -618,11 +695,15 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
         client_secret: clientSecret || undefined,
         email: email || undefined,
         app_password: appPassword || undefined,
+        access_key_id: accessKeyId || undefined,
+        secret_access_key: secretAccessKey || undefined,
+        bucket: bucket || undefined,
       })
       .then(() => {
         setName("");
         setRoot("");
         setAppPassword("");
+        setSecretAccessKey("");
         onAdded();
       })
       .catch((err: Error) => setError(err.message))
@@ -642,6 +723,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
           <option value="dropbox">Dropbox</option>
           <option value="pcloud">pCloud</option>
           <option value="koofr">Koofr</option>
+          <option value="tigris">Tigris</option>
         </select>
         <input
           placeholder="name (e.g. disk-d, my-gdrive)"
@@ -661,6 +743,31 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
             drive, a NAS/network mount. It is created if missing, and only
             encrypted chunks land in it.
           </p>
+        </>
+      ) : type === "tigris" ? (
+        <>
+          <input
+            placeholder="Tigris bucket name"
+            value={bucket}
+            onChange={(e) => setBucket(e.target.value)}
+          />
+          <input
+            placeholder="Tigris Access Key ID"
+            value={accessKeyId}
+            onChange={(e) => setAccessKeyId(e.target.value)}
+          />
+          <input
+            type="password"
+            placeholder="Tigris Secret Access Key"
+            value={secretAccessKey}
+            onChange={(e) => setSecretAccessKey(e.target.value)}
+          />
+          <p className="muted small">
+            Tigris uses an S3 access key (Access Key ID + Secret Access Key),
+            not OAuth — no app to register and no browser consent. Create one in
+            the Tigris dashboard and paste it here.
+          </p>
+          <TigrisGuide />
         </>
       ) : type === "koofr" ? (
         <>
@@ -724,7 +831,7 @@ export function ProviderForm({ onAdded }: { onAdded: () => void }) {
       <div className="form-row">
         <button disabled={busy || !name || missingCreds}>
           {busy
-            ? type === "localfs" || type === "koofr"
+            ? type === "localfs" || type === "koofr" || type === "tigris"
               ? "adding…"
               : "waiting for browser consent…"
             : "add provider"}
