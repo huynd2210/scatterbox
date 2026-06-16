@@ -198,6 +198,46 @@ def test_koofr_onboarding_stores_a_basic_app_password(env, monkeypatch):
     assert "app-pw-123" not in row["config"]  # the secret never hits the register
 
 
+def test_mega_onboarding_stores_email_and_password(env, monkeypatch):
+    """MEGA is secret-backed but not OAuth: the CLI prompts for email +
+    password (no browser), stores them in the vault, and registers the row with
+    only non-secret config."""
+
+    class MegaStub:
+        async def quota(self):
+            return Quota(total_bytes=1000, used_bytes=100, confidence="exact")
+
+        async def prepare(self):
+            pass
+
+        def learned_config(self):
+            return {"folder_handle": "h1"}
+
+    monkeypatch.setattr(onboarding, "create_provider", lambda t, c, s=None: MegaStub())
+    _ok(
+        runner.invoke(
+            cli.app,
+            ["provider", "add", "mg", "--type", "mega"],
+            input="alice@mega.test\nsecret-pw\n",  # email, then password
+        )
+    )
+    home = env / "home"
+    v = unlock_vault(home / "vault.json", PASS)
+    blob = v.get_secret("provider:mg")
+    # email + password stored verbatim (MEGA derives its keys from them at
+    # login); no OAuth tokens to expire or refresh
+    assert blob == {"email": "alice@mega.test", "password": "secret-pw"}
+    assert "refresh_token" not in blob and "expires_at" not in blob
+    reg = Register(home / "register.db")
+    row = reg.get_provider_by_name("mg")
+    config = json.loads(row["config"])
+    reg.close()
+    assert row["type"] == "mega"
+    assert config["secret"] == "provider:mg"
+    assert config["folder_handle"] == "h1"  # learned at onboarding
+    assert "secret-pw" not in row["config"]  # the password never hits the register
+
+
 def test_r2_onboarding_stores_keys_in_vault_and_bucket_in_register(env, monkeypatch):
     """Cloudflare R2 is secret-backed but not OAuth: the CLI prompts for the
     account id + bucket (non-secret) and the S3 access key/secret (vault), and

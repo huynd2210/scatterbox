@@ -109,6 +109,13 @@ via the shared TokenManager/AuthedClient — not OAuth — so a rejected token i
 re-auth. Objects are served from public unguessable URLs, so get() fetches them
 without the bearer and exposure_risk is 'high'; no register config beyond the
 secret ref; quota lists the prefix, 'estimated' with a cap else 'unknown').
+`mega` (visible `scatterbox/` folder at the Cloud Drive root; authenticates
+with the account email+password via MEGA's own login handshake — not OAuth —
+deriving the master key client-side (v1 iterated-AES or v2 PBKDF2); each object
+is AES-CTR-encrypted with a per-object key wrapped under the master key and a
+chunked MAC, refs carry `handle:wrappedkey`; errors are negative ints in a
+200 body. No scoped credential — the full account password is stored, so a
+dedicated account is advised).
 `chaos` exists for tests only (failure injection: 404s, corruption,
 latency, hard-kill).
 
@@ -308,7 +315,7 @@ Local-only by default. `423 Locked` on crypto endpoints while locked.
 | `get VPATH LOCAL` | Restore byte-identically |
 | `ls [VPATH]`, `status VPATH`, `mv SRC DST`, `rm VPATH` | Browse / health / move / delete |
 | `scrub [--full --repair --probe-limit --deep-budget-bytes]` | Verify + heal |
-| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2\|oracle\|tigris\|vercel_blob …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2/oracle/tigris; token for vercel_blob) |
+| `provider add NAME --type localfs\|gdrive\|onedrive\|dropbox\|pcloud\|koofr\|r2\|oracle\|tigris\|vercel_blob\|mega …` | Onboard (OAuth for cloud types; app password for koofr; S3 key/secret for r2/oracle/tigris; token for vercel_blob; email+password for mega) |
 | `provider list / set / remove [--force]` | Inspect / limits / remove |
 | `policy set/show/list/unset` | Folder policies |
 | `export DIR [--plain]` / `import REGISTER VAULT [--force]` | Backup / restore |

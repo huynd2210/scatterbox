@@ -45,6 +45,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       access_key_id?: string;
       secret_access_key?: string;
       token?: string;
+      password?: string;
     } = {};
     if (p.type === "koofr") {
       // App-password backend: always re-prompt for the new credential (no
@@ -84,6 +85,15 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
       if (!t) return;
       body.token = t;
       setMessage(`updating credentials for ${p.name}…`);
+    } else if (p.type === "mega") {
+      // Email+password backend: re-prompt for the credential (no browser).
+      const email = prompt(`MEGA account email for ${p.name}`);
+      if (!email) return;
+      const password = prompt("MEGA password");
+      if (!password) return;
+      body.email = email;
+      body.password = password;
+      setMessage(`updating credentials for ${p.name}…`);
     } else {
       // First try reusing the stored client app credentials; the daemon asks
       // for them only when none survive (e.g. right after a cold recovery).
@@ -110,6 +120,7 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
           p.type !== "oracle" &&
           p.type !== "tigris" &&
           p.type !== "vercel_blob" &&
+          p.type !== "mega" &&
           !askCreds &&
           e.message.includes("client id")
         ) {
@@ -164,7 +175,8 @@ export function Providers({ refreshKey }: { refreshKey: number }) {
             p.type === "r2" ||
             p.type === "oracle" ||
             p.type === "tigris" ||
-            p.type === "vercel_blob"
+            p.type === "vercel_blob" ||
+            p.type === "mega"
               ? () => reauth(p)
               : undefined
           }

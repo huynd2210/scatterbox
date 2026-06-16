@@ -370,6 +370,49 @@ def _onboard_koofr(
     typer.echo(f"added provider {name} (koofr{free})")
 
 
+def _prompt_mega_blob() -> dict:
+    """Prompt for MEGA account credentials and build the vault blob.
+
+    MEGA has no OAuth and no scoped/app-password option — it authenticates with
+    the account email + password, which is what gets stored (encrypted) in the
+    vault. Reused by add/reauth/recover."""
+    from scatterbox.providers.mega import credential_blob
+
+    typer.echo(
+        "MEGA uses your account email + password (it has no app-password or "
+        "OAuth option). The password is stored in the encrypted vault and "
+        "grants full account access; scatterbox confines itself to a "
+        "scatterbox/ folder."
+    )
+    email = typer.prompt("MEGA account email")
+    password = typer.prompt("MEGA password", hide_input=True)
+    return credential_blob(email, password)
+
+
+def _onboard_mega(
+    register: Register,
+    name: str,
+    max_object_bytes: int | None,
+    capacity_bytes: int | None,
+) -> None:
+    """CLI front-end for MEGA (email+password) onboarding: prompt here, shared
+    store/test/register flow in scatterbox.onboarding."""
+    v = _unlock()
+    quota = onboarding.onboard_secret_provider(
+        register,
+        v,
+        name,
+        "mega",
+        blob=_prompt_mega_blob(),
+        max_object_bytes=max_object_bytes,
+        capacity_bytes=capacity_bytes,
+    )
+    free = "" if quota.total_bytes is None else (
+        f", {_human(quota.total_bytes - quota.used_bytes)} free"
+    )
+    typer.echo(f"added provider {name} (mega{free})")
+
+
 def _prompt_r2_blob() -> dict:
     """Prompt for Cloudflare R2's S3 access key pair and build the vault blob.
 
@@ -578,7 +621,7 @@ def _onboard_vercel_blob(
 @provider_app.command("add")
 def provider_add(
     name: Annotated[str, typer.Argument()],
-    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle | tigris | vercel_blob")] = "localfs",
+    type_: Annotated[str, typer.Option("--type", help="localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle | tigris | vercel_blob | mega")] = "localfs",
     root: Annotated[Optional[Path], typer.Option(help="Directory for localfs storage.")] = None,
     max_object_bytes: Annotated[Optional[int], typer.Option(min=1)] = None,
     capacity_bytes: Annotated[Optional[int], typer.Option(min=1, help="Cap how much of the account scatterbox may use.")] = None,
@@ -621,6 +664,16 @@ def provider_add(
             else:
                 _fail(f"provider {name!r} already exists")
             _onboard_koofr(register, name, max_object_bytes, capacity_bytes)
+        elif type_ == "mega":
+            # Secret-backed but not OAuth: email+password prompt, no browser
+            # consent. Fail on a duplicate name before prompting.
+            try:
+                register.get_provider_by_name(name)
+            except ScatterboxError:
+                pass
+            else:
+                _fail(f"provider {name!r} already exists")
+            _onboard_mega(register, name, max_object_bytes, capacity_bytes)
         elif type_ == "r2":
             # S3 access-key backend (not OAuth): its own credential prompt, no
             # browser consent. Fail on a duplicate name before prompting.
@@ -716,6 +769,7 @@ def provider_reauth(
             "oracle": _prompt_oracle_blob,
             "tigris": _prompt_tigris_blob,
             "vercel_blob": _prompt_vercel_blob_blob,
+            "mega": _prompt_mega_blob,
         }
         if ptype in secret_reauth_prompts:
             # Secret backends (no browser): re-prompt for just the credential —
@@ -961,7 +1015,7 @@ def restore(
 
 @app.command()
 def recover(
-    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle | tigris | vercel_blob.")],
+    type_: Annotated[str, typer.Option("--type", help="Provider type holding a snapshot: localfs | gdrive | onedrive | dropbox | pcloud | koofr | r2 | oracle | tigris | vercel_blob | mega.")],
     root: Annotated[Optional[Path], typer.Option(help="The localfs provider's directory.")] = None,
     client_id: Annotated[Optional[str], typer.Option(help="OAuth client id (cloud types); prompted if omitted.")] = None,
     name: Annotated[Optional[str], typer.Option(help="Provider name in the recovered register (needed when several share the type).")] = None,
@@ -1006,6 +1060,13 @@ def recover(
             blob = _prompt_koofr_blob()
             provider = create_provider(
                 "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+            )
+        elif type_ == "mega":
+            # Email+password backend: prompt for the credential, then recover
+            # and adopt it like the OAuth types.
+            blob = _prompt_mega_blob()
+            provider = create_provider(
+                "mega", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
             )
         elif type_ == "r2":
             # S3 access-key backend: prompt for account id + bucket (to locate

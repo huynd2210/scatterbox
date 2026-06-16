@@ -253,6 +253,20 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                 provider = create_provider(
                     "koofr", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
                 )
+            elif type_ == "mega":
+                from scatterbox.providers.mega import credential_blob
+
+                email = (body.get("email") or "").strip()
+                password = body.get("password") or ""
+                if not email or not password:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="MEGA account email and password required",
+                    )
+                blob = credential_blob(email, password)
+                provider = create_provider(
+                    "mega", {"secret": "recovery"}, vault.MemorySecretStore(recovery=blob)
+                )
             elif type_ == "r2":
                 from scatterbox.providers.r2 import credential_blob
 
@@ -434,6 +448,16 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         raise ScatterboxError("Vercel Blob read-write token required")
                     return onboarding.update_provider_secret(
                         reg, state.vault, name, credential_blob(token)
+                    )
+                if ptype == "mega":
+                    from scatterbox.providers.mega import credential_blob
+
+                    email = (body.get("email") or "").strip()
+                    password = body.get("password") or ""
+                    if not email or not password:
+                        raise ScatterboxError("MEGA account email and password required")
+                    return onboarding.update_provider_secret(
+                        reg, state.vault, name, credential_blob(email, password)
                     )
                 return onboarding.reauth_provider(
                     reg,
@@ -890,6 +914,32 @@ def create_app(home: Path | str | None = None) -> FastAPI:
                         reg.close()
 
                 await asyncio.to_thread(run_koofr_onboarding)
+            elif type_ == "mega":
+                _require_unlocked(state)
+                from scatterbox.providers.mega import credential_blob
+
+                email = (body.get("email") or "").strip()
+                password = body.get("password") or ""
+                if not email or not password:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="MEGA account email and password required",
+                    )
+                blob = credential_blob(email, password)
+
+                def run_mega_onboarding() -> None:
+                    # Own register connection on the worker thread (the shared
+                    # onboarding flow does its connection test via asyncio.run,
+                    # which cannot run inside this event loop).
+                    reg = Register(state.home / "register.db")
+                    try:
+                        onboarding.onboard_secret_provider(
+                            reg, state.vault, name, "mega", blob=blob, **limits
+                        )
+                    finally:
+                        reg.close()
+
+                await asyncio.to_thread(run_mega_onboarding)
             elif type_ == "r2":
                 _require_unlocked(state)
                 from scatterbox.providers.r2 import credential_blob

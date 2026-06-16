@@ -337,6 +337,43 @@ def test_koofr_provider_add_via_api(client, monkeypatch):
     assert any(p["name"] == "kf" for p in client.get("/api/providers").json())
 
 
+def test_mega_provider_add_via_api(client, monkeypatch):
+    """MEGA is secret-backed but not OAuth: the endpoint takes an email +
+    password and hands the shared flow the credential blob, no browser."""
+    from scatterbox import onboarding
+
+    calls = {}
+
+    def fake_onboard(register, v, name, type_, **kwargs):
+        calls.update({"name": name, "type": type_, **kwargs})
+        register.add_provider(name, type_, {"secret": f"provider:{name}"})
+
+    monkeypatch.setattr(onboarding, "onboard_secret_provider", fake_onboard)
+    # locked: refused before any credential is used
+    resp = client.post(
+        "/api/providers",
+        json={"name": "mg", "type": "mega", "email": "a@m.test", "password": "pw"},
+    )
+    assert resp.status_code == 423 and calls == {}
+
+    unlock(client)
+    # missing password is rejected up front
+    assert (
+        client.post("/api/providers", json={"name": "mg", "type": "mega", "email": "a@m.test"}).status_code
+        == 400
+    )
+
+    resp = client.post(
+        "/api/providers",
+        json={"name": "mg", "type": "mega", "email": "a@m.test", "password": "pw"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert calls["name"] == "mg" and calls["type"] == "mega"
+    # email + password reached the flow as MEGA's credential blob
+    assert calls["blob"] == {"email": "a@m.test", "password": "pw"}
+    assert any(p["name"] == "mg" for p in client.get("/api/providers").json())
+
+
 def test_r2_provider_add_via_api(client, monkeypatch):
     """Cloudflare R2 is secret-backed but not OAuth: the endpoint takes an S3
     access key/secret plus the (non-secret) account id + bucket, and hands the

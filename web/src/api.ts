@@ -61,6 +61,7 @@ export const api = {
     region?: string;
     bucket?: string;
     token?: string;
+    password?: string;
     name?: string;
   }) =>
     request<{ files: number; adopted: string | null; pending_reauth: string[] }>(
@@ -77,6 +78,7 @@ export const api = {
       access_key_id?: string;
       secret_access_key?: string;
       token?: string;
+      password?: string;
     },
   ) => request(`/api/providers/${encodeURIComponent(name)}/reauth`, json(body)),
   unlock: (passphrase: string) => request("/api/unlock", json({ passphrase })),

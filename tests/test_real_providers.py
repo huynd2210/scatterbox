@@ -15,6 +15,7 @@ To run, onboard a provider into a dedicated scatterbox home first:
     set SCATTERBOX_TEST_ORACLE=or
     set SCATTERBOX_TEST_TIGRIS=tg
     set SCATTERBOX_TEST_VERCEL_BLOB=vb
+    set SCATTERBOX_TEST_MEGA=mg
     uv run pytest tests/test_real_providers.py -v
 
 Each test stores a small file pinned to that single provider (replicas=1),
@@ -143,3 +144,11 @@ def test_tigris_real_roundtrip(tmp_path):
 )
 def test_vercel_blob_real_roundtrip(tmp_path):
     _roundtrip(os.environ["SCATTERBOX_TEST_VERCEL_BLOB"], tmp_path)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SCATTERBOX_TEST_MEGA"),
+    reason="set SCATTERBOX_TEST_MEGA=<provider name> to run against MEGA",
+)
+def test_mega_real_roundtrip(tmp_path):
+    _roundtrip(os.environ["SCATTERBOX_TEST_MEGA"], tmp_path)
